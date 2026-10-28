@@ -79,7 +79,16 @@ export default {
     if (req.method === "OPTIONS")
       return new Response(null, { status: 204, headers: { ...cors, "access-control-allow-methods": "POST", "access-control-allow-headers": "content-type, accept, mcp-protocol-version, mcp-session-id, authorization" } });
     // No server-to-client stream (GET) and no sessions to end (DELETE): this server only answers requests.
-    if (req.method !== "POST") return json(405, { error: "Use POST." }, { allow: "POST, OPTIONS", ...cors });
+    if (req.method !== "POST") {
+      // Someone opened the link in a browser: still a 405 (MCP clients POST), but say what this address is for.
+      const wantsPage = req.method === "GET" && /text\/html/.test(req.headers.get("accept") ?? "");
+      if (wantsPage)
+        return new Response(
+          `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Agent Referee MCP server</title><body style="font-family:system-ui,sans-serif;max-width:40rem;margin:2rem auto;padding:0 1rem;line-height:1.5"><h1>Agent Referee MCP server</h1><p>This address is for apps like ChatGPT, not a web page. Add it as a connector: in ChatGPT, open Settings → Apps &amp; Connectors, turn on Developer mode under Advanced settings, choose Create, and use this URL with no authentication:</p><p><code>${url.origin}/mcp</code></p><p>It gives a few free independent reviews a day of a piece of work against its task, with a signed receipt. More: <a href="https://github.com/ccheez34/agent-referee-mcp/tree/main/remote">setup and privacy</a> · <a href="https://agentreferee.ai">agentreferee.ai</a></p></body>`,
+          { status: 405, headers: { "content-type": "text/html; charset=utf-8", allow: "POST, OPTIONS", ...cors } },
+        );
+      return json(405, { error: "Use POST. This is an MCP endpoint for apps like ChatGPT; see GET / for what it offers." }, { allow: "POST, OPTIONS", ...cors });
+    }
 
     const pv = req.headers.get("mcp-protocol-version");
     if (pv && !SUPPORTED_PROTOCOL_VERSIONS.includes(pv)) return json(400, { jsonrpc: "2.0", id: null, error: { code: -32600, message: `Unsupported MCP-Protocol-Version: ${pv}` } }, cors);

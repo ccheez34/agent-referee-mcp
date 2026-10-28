@@ -118,6 +118,9 @@ test("MCP basics: initialize, tools with explicit annotations, notifications acc
   assert.equal(note.status, 202);
   const get = await worker.fetch(new Request("https://mcp.test/mcp"), env);
   assert.equal(get.status, 405);
+  const page = await worker.fetch(new Request("https://mcp.test/mcp", { headers: { accept: "text/html" } }), env);
+  assert.equal(page.status, 405, "a browser still gets 405");
+  assert.match(await page.text(), /not a web page/);
   assert.equal((await rpc(env, "ping", {}, { headers: { origin: "https://evil.example" } })).status, 403);
   const fromChatgpt = await rpc(env, "ping", {}, { headers: { origin: "https://chatgpt.com" } });
   assert.equal(fromChatgpt.status, 200);
