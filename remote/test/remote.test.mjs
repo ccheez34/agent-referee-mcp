@@ -201,7 +201,7 @@ test("refusals and busy answers come back as clear failures; the free review isn
   const down = makeEnv({}, async () => {
     throw new Error("network down");
   });
-  assert.match((await call(down, "start_review", work)).data.error, /didn't answer in time/);
+  assert.match((await call(down, "start_review", work)).data.error, /couldn.t be reached or didn.t answer in time/);
 });
 
 test("a review interrupted mid-way is never sent twice", async () => {

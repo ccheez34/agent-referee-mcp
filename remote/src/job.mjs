@@ -48,9 +48,11 @@ export class ReviewJob {
     const url = new URL(req.url);
     const st = this.state.storage;
     if (url.pathname === "/start" && req.method === "POST") {
-      if (await st.get("job")) return json(409, { error: "This job already exists." });
+      // Read the body first, so the existence check and the writes below run with no gap between them.
       const b = await req.json().catch(() => null);
       if (!b || typeof b.id !== "string" || !TIERS.includes(b.tier) || typeof b.task !== "string" || typeof b.output !== "string") return json(400, { error: "Bad job request." });
+      if (!this.env.INTERNAL_TOKEN) return json(503, { error: "Not connected to Agent Referee." }); // the hashes need the key
+      if (await st.get("job")) return json(409, { error: "This job already exists." });
       const created = this.now();
       await st.put("job", {
         id: b.id,
@@ -72,6 +74,7 @@ export class ReviewJob {
       const deadline = this.now() + waitMs;
       const missing = json(404, { error: "No review with that job_id for you (results are kept for 24 hours)." });
       let job = await st.get("job");
+      if (job && this.now() >= job.expires) await st.deleteAll().catch(() => {}); // expired: delete it now
       if (!job || this.now() >= job.expires) return missing;
       // A job started by a known person can only be read with that person's id.
       if (job.owner && (!subject || job.owner !== (await ownerFor(this.env, subject)))) return missing;
@@ -155,7 +158,7 @@ export class ReviewJob {
       });
     } catch (e) {
       // The service gives the allowance back when a review doesn't complete, but it may still have been running.
-      return { status: "failed", error: `Agent Referee didn't answer in time (${String(e?.message ?? e).slice(0, 120)}). ${MAYBE_USED} Try again later.`, free_review_used: "maybe" };
+      return { status: "failed", error: `Agent Referee couldn't be reached or didn't answer in time (${String(e?.message ?? e).slice(0, 120)}). ${MAYBE_USED} Try again later.`, free_review_used: "maybe" };
     }
     const data = await res.json().catch(() => null);
     if (!res.ok) {
