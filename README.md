@@ -103,6 +103,10 @@ It is **not a guarantee the output is correct**:
 
 The task and output are sent to the AI companies running the reviewers, so leave secrets and personal data out. Details: [PRIVACY.md](https://github.com/ccheez34/agent-referee-client/blob/main/PRIVACY.md).
 
+## Skill: independent-check
+
+[`skills/independent-check/SKILL.md`](skills/independent-check/SKILL.md) is an Agent Skill that teaches an agent when a sealed review is worth paying for, how to write a neutral request, and how to report the verdict honestly. In Claude Code, copy the folder into `~/.claude/skills/` (or your project's `.claude/skills/`). In the Claude apps, upload it as a skill.
+
 ## Tie-breaking with another agent
 
 Both agents need this server (or the [JavaScript client](https://www.npmjs.com/package/agent-referee-client)). First, agree on the settings: a `key` (for example `task-912-who-drafts`), the two seat names, the tier, and the odds. Then each agent calls `tiebreak` with its own `my_seat`:
