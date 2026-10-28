@@ -36,7 +36,7 @@ Don't use it when:
 - `output`: the exact work, unchanged (up to 12,000 characters). The receipt is tied to this exact text, byte for byte, so don't reformat it afterwards.
 - `title` (optional): a short label for the receipt.
 - `criteria` (optional): weighted criteria like `[{"name": "accuracy", "weight": 3}]` to get 0-10 scores.
-- Split large work into separately checkable pieces rather than truncating it. Reviewers are less reliable on long inputs, and above 8,000 characters (task + output) the service leaves lighter models out of the panel.
+- Split large work into separately checkable pieces rather than truncating it. Reviewers are less reliable on long inputs, and above 6,000 characters (task + output) the service leaves lighter models out of the panel.
 - Each piece is reviewed on its own. Choosing the same models again doesn't give you the same reviewer: nothing carries over between reviews. So in each piece's task, say briefly what the other pieces do, and list only the requirements this piece can show. A requirement whose code is in another piece gets marked missing.
 - Send the latest version. Before calling, confirm the output is the exact file or text you mean to check (a stale copy gives a valid receipt about the wrong work).
 - Keep the task neutral: state the requirements and claims to check, not how good the work is or what is at stake. Wording like that is known to make reviewers more lenient.
