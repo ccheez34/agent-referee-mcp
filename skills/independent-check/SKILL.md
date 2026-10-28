@@ -48,6 +48,8 @@ To check one piece several times (a different panel each run, so the runs are in
 - Write all the commands into one script file (`.cmd` on Windows, `.sh` elsewhere) that runs them one after another and saves each result to its own file. Then give the user one line to run. Long commands pasted one by one get cut off or mistyped, and saved results can be read straight from the files instead of being pasted back.
 - Use full paths, and check that the folder the script runs from really contains the review script before handing it over.
 - Give each run a different panel: one model from each of three AI companies, varied between runs, with repeats of a model allowed.
+- When handing over the line to run, say what to send back once it finishes. The receipt comes first: it's the signed record, and it already holds each reviewer's verdict, issues and reasoning. If you can read the user's files, ask them to just say "done" and read the receipt and result files yourself. If you can't, ask them to paste each receipt file's full contents (the JSON, not just its path) and, if they can, everything the window printed, untrimmed. Then verify each receipt with `verify_receipt` against the exact task and output you sent.
+- A receipt holds only hashes of the task and output, not the work itself, but a paid one names the paying wallet. Mention that before the user posts a receipt anywhere public.
 
 ## Reporting the result
 
