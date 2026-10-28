@@ -60,6 +60,7 @@ function present(job) {
       votes: job.votes,
       receipt: job.receipt,
       free: job.free,
+      free_note: "The free count is what the service reported; it isn't part of the signed receipt.",
       checked: job.checked,
       next: "Report the verdict and the problems each reviewer found; don't overstate it. Keep the receipt with the exact task and output: anyone holding all three can check it (verify_receipt). A review is not a guarantee the output is correct, and a re-run can differ.",
     };
@@ -71,7 +72,7 @@ function present(job) {
       ...(job.problems ? { problems: job.problems } : {}),
       ...(job.busy ? { busy: true } : {}),
       ...(job.retry_after_seconds ? { retry_after_seconds: job.retry_after_seconds } : {}),
-      // "no", "maybe" (interrupted or timed out) or "yes" (a review ran but its answer failed the checks).
+      // "no", "maybe" (interrupted, timed out, or a server error) or "probably" (a review ran but its answer failed the checks).
       free_review_used: job.free_review_used ?? "no",
     };
   return { summary: "The review is still running.", ...base, next: "Call get_review again with the same job_id. Reviews usually take 10-90 seconds, sometimes up to about 5 minutes." };

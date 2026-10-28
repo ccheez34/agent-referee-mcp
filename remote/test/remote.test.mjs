@@ -46,7 +46,7 @@ function jobs(env) {
         const o = { alarmAt: null };
         const storage = {
           async get(k) { return structuredClone(d.get(k)); },
-          async put(k, v) { d.set(k, structuredClone(v)); },
+          async put(k, v) { if (typeof k === "object") for (const [kk, vv] of Object.entries(k)) d.set(kk, structuredClone(vv)); else d.set(k, structuredClone(v)); },
           async delete(k) { return d.delete(k); },
           async deleteAll() { d.clear(); },
           async setAlarm(t) {
@@ -320,6 +320,40 @@ test("an alarm that throws isn't rethrown; a job stuck running is reported as in
   assert.equal((await call(refused, "start_review", work)).data.free_review_used, "no");
   const forged = makeEnv({}, okAnswer({ key: evil }));
   const f = await call(forged, "start_review", work);
-  assert.equal(f.data.free_review_used, "yes");
+  assert.equal(f.data.free_review_used, "probably");
   assert.match(f.data.error, /probably used/);
+});
+
+test("v3 fixes: a stuck job is marked failed for good and its text deleted; server errors say 'maybe'; an expired job is never sent", async () => {
+  const env = makeEnv({ START_WAIT_MS: "0" });
+  const s = await call(env, "start_review", work);
+  const obj = env.JOBS.objs.get(s.data.job_id);
+  await new Promise((r) => setTimeout(r, 20));
+  const job = await obj.job.state.storage.get("job");
+  await obj.job.state.storage.put("job", { ...job, status: "running", attempted: true, started_at: Date.now() - 10 * 60_000 });
+  await obj.job.state.storage.put("input", { task: work.task, output: work.output });
+  const g = await call(env, "get_review", { job_id: s.data.job_id });
+  assert.equal(g.data.free_review_used, "maybe");
+  assert.equal(obj.data.has("input"), false, "the text is deleted as soon as the job is known to have failed");
+  assert.equal((await obj.job.state.storage.get("job")).status, "failed", "the failure is stored, not just shown");
+  // A 502 without "wasn't used" in it: maybe. A 4xx: no.
+  const e502 = makeEnv({}, async () => new Response(JSON.stringify({ error: "bad gateway" }), { status: 502 }));
+  assert.equal((await call(e502, "start_review", work)).data.free_review_used, "maybe");
+  const e502used = makeEnv({}, async () => new Response(JSON.stringify({ error: "A reviewer failed. Your free review wasn't used; try again." }), { status: 502 }));
+  assert.equal((await call(e502used, "start_review", work)).data.free_review_used, "no");
+  // A 200 whose body can't be read: maybe.
+  const garbled = makeEnv({}, async () => new Response("not json", { status: 200 }));
+  assert.equal((await call(garbled, "start_review", work)).data.free_review_used, "maybe");
+  // An alarm that only runs after expiry deletes the job instead of sending it.
+  const late = makeEnv({ START_WAIT_MS: "0" });
+  const id = "e".repeat(32);
+  const stub = late.JOBS.get(id);
+  const o = late.JOBS.objs.get(id);
+  o.job.alarm = () => Promise.resolve(); // hold the immediate alarm back
+  await stub.fetch("https://job/start", { method: "POST", body: JSON.stringify({ id, tier: "review", ...work }) });
+  delete o.job.alarm; // back to the real alarm, which now fires a day late
+  o.job.now = () => Date.now() + 25 * 3600_000;
+  await o.job.alarm();
+  assert.equal(late.REFEREE.calls.length, 0, "an expired job is never sent");
+  assert.equal(o.data.size, 0, "and it's deleted");
 });
