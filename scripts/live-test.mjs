@@ -54,7 +54,12 @@ if (forged.payload) forged.payload.outcome.winner = forged.payload.parties.find(
 const vf = await s.call("verify_receipt", { receipt: forged });
 check("verify_receipt: a receipt with the winner flipped is rejected", vf.structured?.ok === false && vf.structured?.signature_valid === false);
 const noWallet = await s.call("sealed_review", { task: "Add 2 and 2 and give only the number.", output: "4" });
-check("sealed_review without a wallet explains setup and charges nothing", noWallet.isError && /no wallet set up/.test(noWallet.text));
+// Uses one of today's free reviews from this address (the service pays): a real review, no wallet involved.
+check(
+  "sealed_review without a wallet runs a free review: checked receipt marked funding: free",
+  !noWallet.isError && noWallet.structured?.check?.ok === true && noWallet.structured?.receipt?.payload?.funding === "free" && noWallet.structured?.paid === undefined,
+  noWallet.text.slice(0, 400),
+);
 await s.close();
 check("stdout carried only JSON-RPC", s.badLines.length === 0, s.badLines.slice(0, 3).join(" | "));
 
