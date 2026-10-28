@@ -3,7 +3,7 @@
 // first size that fails. A failure (timeout) is never charged.
 //
 //   node scripts\model-limit-test.mjs --wallet-file <path> --model deepseek/deepseek-v4-pro-0813 --file ..\research\server-free-code-v3.txt
-//   Optional: --sizes 2000,4000,6000,8000,10000,12000   (characters of task + output; default as shown)
+//   Optional: --sizes 2000,4000,6000,8000,10000,12000   (characters of task + output, up to 16000; default as shown)
 //
 // The key is read from the wallet file, never printed. At most 6 paid reviews ($0.30), capped by this run's own
 // data folder and spending cap.
@@ -38,14 +38,18 @@ await s.init();
 console.log(`Model: ${model}. Sizes (task + output characters): ${sizes.join(", ")}. Up to $${(0.05 * sizes.length).toFixed(2)}.\n`);
 const results = [];
 for (const size of sizes) {
+  // Output holds up to 12,000 characters; above that, the rest goes into the task as context (task limit 4,000),
+  // so sizes up to the service's 16,000 maximum can be tested.
   const outLen = Math.min(12000, size - task.length);
-  if (outLen > doc.length) {
-    console.log(`${size}: the document is only ${doc.length} characters; stopping.`);
+  const extra = Math.max(0, size - task.length - outLen);
+  if (outLen + extra > doc.length || task.length + extra > 4000) {
+    console.log(`${size}: the document (${doc.length} characters) is too short for this size, or it's over the service's limit; stopping.`);
     break;
   }
   const output = doc.slice(0, outLen);
+  const fullTask = extra ? `${task}\n\nContext, the code that comes after the excerpt:\n${doc.slice(outLen, outLen + extra)}` : task;
   const t0 = Date.now();
-  const r = await s.call("sealed_review", { tier: "review", task, output, title: `Limit test ${model} ${size}`, panel: [model] });
+  const r = await s.call("sealed_review", { tier: "review", task: fullTask, output, title: `Limit test ${model} ${size}`, panel: [model] });
   const secs = ((Date.now() - t0) / 1000).toFixed(0);
   if (r.isError) {
     const why = (r.text.match(/"error":\s*"([^"]+)"/)?.[1] ?? r.text).slice(0, 200);
