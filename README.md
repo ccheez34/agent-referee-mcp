@@ -176,6 +176,7 @@ All optional, set in the server's `env`:
 
 - **One person runs Agent Referee.** There's no company or on-call team behind it yet. Status page: https://stats.uptimerobot.com/dh6sVMvo3W
 - **Testing so far:** the service has handled 300+ paid matches and about 26 paid reviews, all self-play from the operator's test wallet. There are **no outside customers yet**.
+- **Size limit:** one review reads up to 4,000 characters of task and 12,000 of output. Longer work has to be split into separate reviews, and each one is independent. Naming the same models gets the same *models*, not a reviewer that remembers the other part, so a problem that spans parts can be missed or wrongly flagged: a requirement in one part with its code in another, say. Put what the other parts do in each brief, and list only the requirements that part can show.
 - **This MCP server's tests:** its own suite drives it over stdio against the open-source server's real match and review code, with real signing.
 
 ## Links
