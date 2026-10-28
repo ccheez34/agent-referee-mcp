@@ -1,6 +1,6 @@
 # Part 4 data: every vote, the rotation draws and the most common findings
 
-Oct 28, 2026 · ccheez34. The numbers behind [Part 4](part-4-chatgpt-build.md): 15 paid `review-3` checks ($3.00) on the ChatGPT build. The votes come straight from the review output. The finding counts are Claude's, made by reading every issue each reviewer listed (see the note on the last table).
+Oct 28, 2026 · ccheez34. The numbers behind [Part 4](part-4-chatgpt-build.md): 15 paid `review-3` checks on the ChatGPT build ($0.20 each, $3.00 in total). The votes come straight from the review output. The finding counts are Claude's, made by reading every issue each reviewer listed (see the note on the last table).
 
 Short names: Opus = Claude Opus 5.5, Sonnet = Claude Sonnet 5.5, GPT = GPT-6 Luna, Argon = Gemini 4 Argon, Flash = Gemini 3.7 Flash. nc = needs_changes, ca = cannot_assess.
 
@@ -31,7 +31,7 @@ Short names: Opus = Claude Opus 5.5, Sonnet = Claude Sonnet 5.5, GPT = GPT-6 Lun
 | 14 | v3 | Sonnet nc | GPT nc | Argon pass | nc |
 | 15 | v3 | Sonnet nc | GPT nc | Flash pass | nc |
 
-**Verdicts:** 1 fail, 13 needs_changes, 1 pass, no splits.
+**Verdicts:** 1 fail, 13 needs_changes, 1 pass. Reviewers disagreed in most runs, but every run had a 2-of-3 majority, so none ended as a `split` verdict.
 
 **By reviewer (45 seats):**
 
@@ -59,14 +59,16 @@ Of the 12 pass votes, 11 came from a Gemini model. The Google seat passed every 
 | Google | Argon 2, Flash 1 | Argon 4, Flash 1 | Argon 6, Flash 2 |
 
 - **What actually varies:** GPT-6 Luna sits on every rotated panel, so rotation varies only the Anthropic and Google seats.
-- **The draw clustered:** version 3 drew Sonnet five times in a row. If each draw is a fair 50/50, that happens about 3% of the time. Eight draws can't show whether the draw is fair.
+- **The draw clustered:** version 3 drew Sonnet five times in a row. If each draw is a fair 50/50, five Sonnets in a row happens about 3% of the time, and five of either model about 6%. The pattern was noticed after the fact, and eight draws can't show whether the draw is fair.
 
 ## The most common findings
 
 How to read this table:
 - **Raised:** each reviewer that raised the issue counts once per run.
 - **Could have:** how many seats saw code that had the problem.
-- **How the counts were made:** Claude counted them by reading every issue. Reviewers word the same point differently, so treat the numbers as close, not exact.
+- **Code:** which file, and which version of the review job, had the problem.
+- **By:** how many times each reviewer raised it.
+- **How the counts were made:** Claude counted them by reading every issue. Reviewers word the same point differently, so treat the numbers as close, not exact. The issue lists themselves aren't reproduced here.
 
 | Finding | Code | Raised | Could have | By |
 |---|---|---|---|---|
@@ -91,7 +93,7 @@ How to read this table:
 | A job that wakes after it expires could still be sent | job v3 | 2 | 15 | GPT 1, Sonnet 1 |
 | A body read that times out is labelled "probably used" | job v3 | 2 | 15 | Sonnet 2 |
 
-**Two findings pointed in opposite directions.** In run 10, Opus noted that saying "your free review wasn't used" after a timeout may be untrue. GPT, in the same run and on the same brief, asked for that sentence on more failures. Opus was right; Claude had reached the same conclusion after run 8 and changed the brief.
+**Two findings pointed in opposite directions.** In run 10, Opus noted that saying "your free review wasn't used" after a timeout may be untrue. GPT, in the same run, asked for that sentence on more failures. Both read the version-2 brief, which still had the old requirement. Opus was right: Claude had reached the same conclusion after run 8, and the version-3 brief (runs 11 to 15) dropped it.
 
 **What Claude didn't change:**
 - **The `chatgpt:` label.** It's deliberate: it keeps ChatGPT users separate from any future source.

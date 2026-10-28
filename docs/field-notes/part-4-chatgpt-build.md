@@ -25,7 +25,7 @@ That's 1 fail, 13 needs_changes and 1 pass, with no splits. The one pass came on
 
 The clearest catch was a privacy bug. The brief said ChatGPT's anonymous id for a person must never be stored as-is. The code stored it, alongside the task and output, for as long as each review was running. **All three reviewers flagged it.**
 
-There was a test for exactly this, and it passed. It checked storage only *after* the review had finished, when the input record, id included, had already been deleted. So the test checked the right thing at the wrong moment. The fix stores only keyed hashes (HMAC) of the id, and the tests now check at every stage.
+There was a test for exactly this, and it passed. It checked storage only *after* the review had finished, when the input record, id included, had already been deleted. So the test checked the right thing at the wrong moment. The fix stores only keyed hashes of the id (made a proper HMAC after a later review), and the tests now check at every stage.
 
 Other problems the reviewers found, all confirmed and fixed with a test:
 
@@ -68,9 +68,9 @@ Until the service can review one piece of work in parts, the workaround is in th
 
 The owner ran three files several times each, without changing them: the entry point three times on the fixed panel, version 2 three times on the rotating panel, and version 3 five times on the rotating panel.
 
-**The verdict was steadier than any one reviewer.** Every file got the same verdict on every run, except one run in five on version 3.
+**In these runs, the verdict was steadier than any one reviewer.** Every file got the same verdict on every run, except one run in five on version 3.
 
-**That one exception is the warning.** Version 3 passed once, 2 to 1, in run 13: Gemini 4 Argon passed it, and so did Sonnet, while still listing six issues. In the other four runs the same text got needs_changes, and Sonnet voted needs_changes in all of them. Running that check once would have had about a one-in-five chance of a pass on code with real gaps.
+**That one exception is the warning.** Version 3 passed once, 2 to 1, in run 13: Gemini 4 Argon passed it, and so did Sonnet, while still listing six issues. In the other four runs the same text got needs_changes, and Sonnet voted needs_changes in all of them. So one of five runs passed code with real gaps. Five runs are too few to put a number on how often that happens, but a single run can clearly come out either way.
 
 **One reviewer can disagree with itself.** On identical text:
 - Gemini 4 Argon passed version 2 in one run and flagged its main bug in the next.
@@ -78,10 +78,10 @@ The owner ran three files several times each, without changing them: the entry p
 
 **The Gemini models passed most often.**
 - Across all 15 checks, Gemini cast 11 of the 12 pass votes. Gemini 4 Argon passed 9 of its 13 seats, and Gemini 3.7 Flash passed both of its seats.
-- On version 3, the Google seat passed all five times. Meanwhile GPT and Sonnet flagged the cleanup gap in 9 of their 10 seats.
+- On version 3, the Google seat passed all five times. Meanwhile GPT and Sonnet flagged the cleanup gap in 9 of their 10 seats (see the data page).
 - Part 2's research says judges lean toward passing on partly correct work. This fits, but doesn't prove it.
 
-**GPT-6 Luna never passed anything,** and it flagged the day's main bugs whenever it saw them. Because it is the only OpenAI model in the pool, it also sat on every rotated panel.
+**GPT-6 Luna never passed anything** (0 of 15 seats) and flagged the alarm problem in all four runs where it was present. It wasn't perfect: it missed the start race in two of the five version-3 runs. Because it is the only OpenAI model in the pool, it sat on every rotated panel.
 
 **A finding that comes up every time isn't necessarily important.** Sonnet flagged the `chatgpt:` label on the caller id in all six of its seats. That label was a deliberate design choice, so the flag is stable noise. Stable tells you a reviewer reliably notices something, not that it matters.
 
@@ -89,7 +89,7 @@ The owner ran three files several times each, without changing them: the entry p
 - **New findings:** Sonnet, which the fixed panel never used, raised the HMAC and the honest-label points first. Opus raised the start race on version 2.
 - **Clustering:** version 3 drew Sonnet all five times, and Opus never. If each draw is a fair 50/50, that happens about 3% of the time. It's worth a look, but five draws can't show the draw is biased.
 
-**Past two runs, repeats mostly repeated.** Each extra run on unchanged code added about one new point, usually minor. Fixing the code and checking the new version found more.
+**Past two runs, repeats mostly repeated.** Later runs on unchanged code mostly raised points earlier runs had already raised. Fixing the code and checking the new version found more.
 
 ## 6. Lessons, added to Part 3's list
 
@@ -97,10 +97,25 @@ The owner ran three files several times each, without changing them: the entry p
 2. **Check the brief before the code.** A requirement that is impossible or dishonest gets enforced like any other.
 3. **Rebuild review files from the current code every time,** right before sending. That would have prevented both stale-file episodes.
 4. **Test at the moment the guarantee matters.** "Never stored" has to be checked while the data is live, not after cleanup.
-5. **Don't trust one run, even a pass.** One run in five passed code that the other four flagged. Two runs agreeing is a much better signal than one.
-6. **Rotate the panel for anything important,** and replace a reviewer that passes everything rather than trusting it.
+5. **Don't trust one run, even a pass.** One run in five passed code that the other four flagged. For anything important, run it twice, and look harder if the two disagree.
+6. **Rotate the panel for anything important,** and weigh a pass from a reviewer that passes most things (Argon passed 9 of 13 seats here) less than a pass from one that rarely does.
 7. **Treat "raised every time" as reliable, not as important.** Weigh what a finding would break.
 8. **Split work knowing no reviewer sees the whole.** Brief each part about the others, and check cross-part claims yourself.
 9. **After two runs, fix and re-check rather than rerun.** Each fix round found more than extra runs on unchanged code did.
 
-None of this replaces tests. Every fix above landed with a test. The ChatGPT server went from 9 to 14 tests and the main server from 165 to 170, all passing. The owner's PC has confirmed the main server's 170, and the ChatGPT server's tests as of its last sync.
+None of this replaces tests. Every fix above landed with a test. The ChatGPT server went from 9 to 14 tests and the main server from 165 to 170. All pass, and the owner's PC confirmed the main server's 170 and the ChatGPT server's 12 before the last round of fixes.
+
+## 7. Checking this report
+
+The owner had this page and its data page checked three times each, on the rotating panel ($1.00 for the five that completed). This page was checked before section 4 existed.
+
+- **This page:** 1 pass (2 to 1) and 2 needs_changes. The points raised were all wording:
+  - a probability read into one pass in five
+  - a claim about GPT-6 Luna that its own start-race count contradicted
+  - lessons stated more firmly than the runs support
+
+  All were fixed above. Gemini 3.7 Flash passed it all three times.
+- **The data page:** 2 passes, both 2 to 1. The points: "no splits" needed defining, the 3% figure was for one model only, and two columns weren't explained. All fixed.
+- **One check didn't complete.** The draw picked Claude Haiku, a lighter model. It ran out of room on the data page's roughly 7,500 characters, and nothing was charged. The service leaves light models out only above 8,000 characters, so that cutoff is too high. It's being lowered to 6,000.
+
+That makes 20 paid checks and $4.00 for the day.
