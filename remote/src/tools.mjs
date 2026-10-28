@@ -40,20 +40,40 @@ function checkReviewArgs(a) {
   if (typeof a.output !== "string" || a.output.length < 1 || a.output.length > 12000) bad("output must be 1-12,000 characters.");
   if (a.tier !== undefined && !["review", "review-3"].includes(a.tier)) bad('tier must be "review" or "review-3".');
   if (a.title !== undefined && (typeof a.title !== "string" || a.title.length > 200)) bad("title must be a string of up to 200 characters.");
-  if (a.panel !== undefined && a.panel !== "rotate" && !(Array.isArray(a.panel) && a.panel.length >= 1 && a.panel.length <= 3 && a.panel.every((m) => typeof m === "string" && m.length >= 1 && m.length <= 80)))
-    bad('panel must be "rotate" or a list of 1-3 model ids.');
+  if (a.panel !== undefined && a.panel !== "rotate") {
+    const need = a.tier === "review-3" ? 3 : 1;
+    if (!Array.isArray(a.panel) || a.panel.length !== need || !a.panel.every((m) => typeof m === "string" && m.length >= 1 && m.length <= 80) || new Set(a.panel).size !== a.panel.length)
+      bad(`panel must be "rotate" or ${need === 3 ? "3 different model ids for review-3" : "1 model id for review"}.`);
+  }
 }
 
-/** What get_review / start_review return for a job. */
+/** What get_review / start_review return for a job: only these fields, never anything else the job holds. */
 function present(job) {
+  const base = { job_id: job.id, status: job.status, tier: job.tier };
   if (job.status === "done")
     return {
       summary: `Sealed review (${job.tier}) done: verdict ${job.verdict}.`,
-      ...job,
+      ...base,
+      review_id: job.review_id,
+      verdict: job.verdict,
+      tally: job.tally,
+      votes: job.votes,
+      receipt: job.receipt,
+      free: job.free,
+      checked: job.checked,
       next: "Report the verdict and the problems each reviewer found; don't overstate it. Keep the receipt with the exact task and output: anyone holding all three can check it (verify_receipt). A review is not a guarantee the output is correct, and a re-run can differ.",
     };
-  if (job.status === "failed") return { summary: `The review didn't complete: ${job.error}`, ...job, free_review_used: false };
-  return { summary: "The review is still running.", job_id: job.id, status: job.status, tier: job.tier, next: "Call get_review again with the same job_id. Reviews usually take 10-90 seconds, sometimes up to about 5 minutes." };
+  if (job.status === "failed")
+    return {
+      summary: `The review didn't complete, and the free review wasn't used: ${job.error}`,
+      ...base,
+      error: job.error,
+      ...(job.problems ? { problems: job.problems } : {}),
+      ...(job.busy ? { busy: true } : {}),
+      ...(job.retry_after_seconds ? { retry_after_seconds: job.retry_after_seconds } : {}),
+      free_review_used: false,
+    };
+  return { summary: "The review is still running.", ...base, next: "Call get_review again with the same job_id. Reviews usually take 10-90 seconds, sometimes up to about 5 minutes." };
 }
 
 /** @param {{ env: any, subject?: string }} deps  subject: ChatGPT's anonymous id for the person, when it sent one. */
@@ -63,8 +83,9 @@ export function buildTools({ env, subject }) {
   const job = (id) => env.JOBS.get(env.JOBS.idFromName(id));
   const status = async (id) => {
     const r = await job(id).fetch(`https://job/status?wait=${waitPoll}`, { headers: subject ? { "x-subject": subject } : {} });
-    const body = await r.json();
-    if (r.status === 404) throw new ToolError(body.error);
+    const body = await r.json().catch(() => null);
+    if (r.status === 404) throw new ToolError(body?.error ?? "No review with that job_id.");
+    if (!r.ok || !body?.status) throw new ToolError("The review's status couldn't be read right now. Try get_review again in a moment.");
     return body;
   };
 
@@ -86,7 +107,8 @@ export function buildTools({ env, subject }) {
         if (!r.ok) throw new ToolError("The review couldn't be started. Try again.");
         if (waitStart > 0) {
           const now = await job(id).fetch(`https://job/status?wait=${Math.min(waitStart, 40_000)}`, { headers: subject ? { "x-subject": subject } : {} });
-          return present(await now.json());
+          const body = now.ok ? await now.json().catch(() => null) : null;
+          return present(body?.status ? body : { id, status: "queued", tier });
         }
         return present({ id, status: "queued", tier });
       },
@@ -94,7 +116,8 @@ export function buildTools({ env, subject }) {
     {
       name: "get_review",
       title: "Get a sealed review's result",
-      description: "FREE. Gets the result of a review started with start_review, waiting up to about 40 seconds if it's still running. Results are kept for 24 hours.",
+      description:
+        "FREE, and doesn't use any of the daily allowance. Gets the result of a review started with start_review, waiting up to about 40 seconds if it's still running. Sends nothing new anywhere: it only reads the result, which is kept for 24 hours. Only for job_ids from start_review.",
       inputSchema: {
         type: "object",
         required: ["job_id"],
@@ -111,7 +134,7 @@ export function buildTools({ env, subject }) {
       name: "verify_receipt",
       title: "Verify a sealed-review receipt",
       description:
-        "FREE and offline. Checks an Agent Referee sealed-review receipt against the service's pinned signing key, recomputes the verdict from the votes, and, when you pass the exact task and output, confirms the receipt is about exactly that work.",
+        "FREE and offline: nothing is sent anywhere and no allowance is used. Checks an Agent Referee sealed-review receipt against the service's pinned signing key, recomputes the verdict from the votes, and, when you pass the exact task and output, confirms the receipt is about exactly that work. A valid receipt shows which models said what about that exact text; it doesn't prove the work is correct.",
       inputSchema: {
         type: "object",
         required: ["receipt"],
@@ -132,13 +155,19 @@ export function buildTools({ env, subject }) {
             throw new ToolError("receipt is a string but not valid JSON.");
           }
         }
-        if (receipt && !receipt.payload && receipt.receipt?.payload) receipt = receipt.receipt;
+        // A whole start_review / get_review answer, or one wrapped in "result" or "structuredContent", works too.
+        for (let i = 0; i < 3 && receipt && !receipt.payload; i++) receipt = receipt.receipt ?? receipt.result ?? receipt.structuredContent;
         if (!receipt?.payload || typeof receipt.payload !== "object") throw new ToolError("That isn't a receipt: it has no payload.");
         const p = receipt.payload;
         const signed = await verifySignature(receipt, publicKeys(env)).catch(() => false);
         if (p.type !== "review")
           return { summary: `${signed ? "Validly signed" : "NOT validly signed"} ${p.type ?? "unknown"} receipt. Only sealed-review receipts are checked in full here; the agent-referee-mcp package checks match receipts too.`, ok: false, signature_valid: signed };
-        const res = await verifyReviewOutcome(receipt, { task: args.task, output: args.output });
+        let res;
+        try {
+          res = await verifyReviewOutcome(receipt, { task: args.task, output: args.output });
+        } catch {
+          res = { ok: false, problems: ["The receipt's review data is malformed."], trusts: [] };
+        }
         const problems = [...(signed ? [] : ["The receipt's signature doesn't check out against Agent Referee's pinned key: it may be forged or altered."]), ...res.problems];
         const notChecked = [...(args.task === undefined ? ["task"] : []), ...(args.output === undefined ? ["output"] : [])];
         const ok = problems.length === 0;

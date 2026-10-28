@@ -9,6 +9,14 @@ import { publicKeys } from "./keys.mjs";
 const KEEP_MS = 24 * 3600_000;
 const REVIEW_TIMEOUT_MS = 330_000; // longer than the service's own reviewer budget plus its queue wait
 
+const TIERS = ["review", "review-3"];
+const NOT_USED = "Your free review wasn't used.";
+
+/** The id sent to Agent Referee for the person: a keyed hash of ChatGPT's id, so the raw id is never stored. */
+export async function callerIdFor(env, subject) {
+  return subject ? (await sha256Hex(`${env.INTERNAL_TOKEN ?? ""}|caller|${subject}`)).slice(0, 40) : null;
+}
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const json = (status, body) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 
@@ -31,6 +39,7 @@ export class ReviewJob {
     if (url.pathname === "/start" && req.method === "POST") {
       if (await st.get("job")) return json(409, { error: "This job already exists." });
       const b = await req.json();
+      if (!TIERS.includes(b.tier)) return json(400, { error: "Unknown tier." });
       const created = this.now();
       await st.put("job", {
         id: b.id,
@@ -39,10 +48,10 @@ export class ReviewJob {
         created,
         expires: created + KEEP_MS,
         // Only a hash of the person's id is kept, to make sure the same person reads the result.
-        owner: b.subject ? await sha256Hex(`owner|${b.subject}`) : null,
+        owner: b.subject ? await sha256Hex(`${this.env.INTERNAL_TOKEN ?? ""}|owner|${b.subject}`) : null,
       });
-      // Kept only until the review has been sent and checked.
-      await st.put("input", { task: b.task, output: b.output, title: b.title, criteria: b.criteria, panel: b.panel, subject: b.subject ?? null });
+      // Kept only until the review has been sent and checked. The person's id is kept only as a keyed hash.
+      await st.put("input", { task: b.task, output: b.output, title: b.title, criteria: b.criteria, panel: b.panel, caller: await callerIdFor(this.env, b.subject) });
       await st.setAlarm(created);
       return json(200, { ok: true });
     }
@@ -50,20 +59,33 @@ export class ReviewJob {
       const waitMs = Math.max(0, Math.min(40_000, Number(url.searchParams.get("wait")) || 0));
       const subject = req.headers.get("x-subject");
       const deadline = this.now() + waitMs;
+      const missing = json(404, { error: "No review with that job_id for you (results are kept for 24 hours)." });
       let job = await st.get("job");
-      if (!job) return json(404, { error: "No review with that job_id (results are kept for 24 hours)." });
-      if (job.owner && subject && job.owner !== (await sha256Hex(`owner|${subject}`))) return json(404, { error: "No review with that job_id (results are kept for 24 hours)." });
+      if (!job || this.now() >= job.expires) return missing;
+      // A job started by a known person can only be read with that person's id.
+      if (job.owner && (!subject || job.owner !== (await sha256Hex(`${this.env.INTERNAL_TOKEN ?? ""}|owner|${subject}`)))) return missing;
       while ((job.status === "queued" || job.status === "running") && this.now() < deadline) {
         await sleep(Math.min(1000, Math.max(1, deadline - this.now())));
         job = (await st.get("job")) ?? job;
       }
-      const { owner, expires, ...visible } = job;
+      const { owner, expires, attempted, ...visible } = job;
       return json(200, visible);
     }
     return json(404, { error: "Unknown job action." });
   }
 
   async alarm() {
+    try {
+      await this.runAlarm();
+    } catch (e) {
+      // Storage trouble: the platform retries the alarm a few times with backoff. The attempted flag (written
+      // before any review is sent) means a retry never sends the review again.
+      console.error(`review job alarm: ${String(e?.message ?? e).slice(0, 200)}`);
+      throw e;
+    }
+  }
+
+  async runAlarm() {
     const st = this.state.storage;
     const job = await st.get("job");
     if (!job) return;
@@ -107,23 +129,24 @@ export class ReviewJob {
         headers: {
           "content-type": "application/json",
           "x-internal-auth": env.INTERNAL_TOKEN ?? "",
-          ...(input.subject ? { "x-caller-id": `chatgpt:${input.subject}` } : {}),
+          ...(input.caller ? { "x-caller-id": `chatgpt:${input.caller}` } : {}),
         },
         body,
         signal: AbortSignal.timeout(REVIEW_TIMEOUT_MS),
       });
     } catch (e) {
-      return { status: "failed", error: `Agent Referee didn't answer in time (${String(e?.message ?? e).slice(0, 120)}). Your free review wasn't used; try again.` };
+      return { status: "failed", error: `Agent Referee didn't answer in time (${String(e?.message ?? e).slice(0, 120)}). ${NOT_USED} Try again.` };
     }
     const data = await res.json().catch(() => null);
     if (!res.ok) {
       const retry = Number(res.headers.get("retry-after")) || undefined;
+      const said = String(data?.error ?? `Agent Referee answered ${res.status}.`).slice(0, 600);
       return {
         status: "failed",
         http_status: res.status,
         busy: res.status === 503 && !!data?.busy,
         ...(retry ? { retry_after_seconds: retry } : {}),
-        error: res.status === 401 || res.status === 404 ? "The hosted server isn't connected to Agent Referee correctly (an operator problem). Nothing was used." : String(data?.error ?? `Agent Referee answered ${res.status}.`).slice(0, 600),
+        error: res.status === 401 || res.status === 404 ? `The hosted server isn't connected to Agent Referee correctly (an operator problem). ${NOT_USED}` : /wasn't used|Nothing was charged/.test(said) ? said : `${said} ${NOT_USED}`,
       };
     }
     const receipt = data?.receipt;
@@ -132,12 +155,14 @@ export class ReviewJob {
     const problems = [...(signed ? [] : ["The receipt's signature doesn't check out against Agent Referee's pinned key."]), ...check.problems];
     if (receipt?.payload?.funding !== "free") problems.push('The receipt doesn\'t say funding: "free".');
     if (problems.length) return { status: "failed", error: "Agent Referee's answer didn't pass the checks, so it isn't shown as a result.", problems };
+    // Everything shown comes from the signed, checked receipt, not from the rest of the answer.
+    const p = receipt.payload;
     return {
       status: "done",
-      review_id: data.review_id,
-      verdict: data.result?.verdict,
-      tally: data.result?.tally,
-      votes: data.votes,
+      review_id: p.review_id,
+      verdict: p.result?.verdict,
+      tally: p.result?.tally,
+      votes: p.votes,
       free: data.free,
       receipt,
       checked: "The receipt's signature was checked against Agent Referee's pinned key, and it was confirmed to be about exactly the task and output that were sent.",

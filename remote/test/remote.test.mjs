@@ -3,6 +3,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { canonicalJson, sha256Hex } from "agent-referee-client";
 import worker, { ReviewJob, subjectOf } from "../src/worker.mjs";
+import { callerIdFor } from "../src/job.mjs";
 
 const b64 = (b) => Buffer.from(b).toString("base64");
 async function keypair() {
@@ -137,7 +138,8 @@ test("start_review: a quick review comes back done in one call, checked, with th
   const sent = env.REFEREE.calls[0];
   assert.equal(sent.url, "https://agentreferee.test/internal/free/review");
   assert.equal(sent.headers["x-internal-auth"], "t".repeat(40));
-  assert.equal(sent.headers["x-caller-id"], "chatgpt:user-123");
+  assert.equal(sent.headers["x-caller-id"], `chatgpt:${await callerIdFor(env, "user-123")}`, "only a keyed hash of the person's id is sent");
+  assert.ok(!sent.headers["x-caller-id"].includes("user-123"));
   assert.deepEqual(Object.keys(sent.body).filter((k) => sent.body[k] !== undefined).sort(), ["output", "task"]);
   const [obj] = env.JOBS.objs.values();
   assert.equal(obj.data.has("input"), false, "the task and output are deleted once the review is done");
@@ -161,6 +163,8 @@ test("start_review then get_review: the slow path, review-3, and only the same p
   assert.equal(g.data.tier, "review-3");
   assert.equal(g.data.votes.length, 3);
   assert.equal(env.REFEREE.calls[0].url, "https://agentreferee.test/internal/free/review-3");
+  assert.equal(g.data.attempted, undefined, "internal fields aren't shown");
+  assert.equal((await call(env, "get_review", { job_id: id })).isError, true, "a job with an owner can't be read without an id");
   const other = await call(env, "get_review", { job_id: id }, "user-b");
   assert.equal(other.isError, true);
   assert.match(other.content[0].text, /No review with that job_id/);
@@ -251,7 +255,41 @@ test("verify_receipt: valid, tampered, wrong text, and not a receipt", async () 
 test("subjectOf reads ChatGPT's anonymous id only when it's a plain short string", () => {
   assert.equal(subjectOf({ params: { _meta: { "openai/subject": "v1/abc" } } }), "v1/abc");
   assert.equal(subjectOf([{ method: "ping" }, { params: { _meta: { "openai/subject": "x" } } }]), "x");
-  assert.equal(subjectOf({ params: { _meta: { "openai/subject": "has space" } } }), undefined);
+  assert.equal(subjectOf({ params: { _meta: { "openai/subject": "has space" } } }), "has space");
+  assert.equal(subjectOf({ params: { _meta: { "openai/subject": "   " } } }), undefined);
+  assert.equal(subjectOf({ params: { _meta: { "openai/subject": "tab\there" } } }), undefined);
   assert.equal(subjectOf({ params: { _meta: { "openai/subject": "a".repeat(201) } } }), undefined);
   assert.equal(subjectOf(null), undefined);
+});
+
+test("the shown verdict comes from the signed receipt, not the rest of the answer; expired jobs can't be read", async () => {
+  const env = makeEnv({}, async (req, body) => {
+    const r = await okAnswer()(req, body);
+    const d = await r.json();
+    return new Response(JSON.stringify({ ...d, result: { verdict: "fail" }, votes: [] }), { status: 200 });
+  });
+  const r = await call(env, "start_review", work);
+  assert.equal(r.data.status, "done");
+  assert.equal(r.data.verdict, "pass");
+  assert.equal(r.data.votes.length, 1);
+  const [obj] = env.JOBS.objs.values();
+  obj.job.now = () => Date.now() + 25 * 3600_000;
+  assert.equal((await call(env, "get_review", { job_id: r.data.job_id })).isError, true);
+});
+
+test("panel must match the tier: 1 model for review, 3 different ones for review-3", async () => {
+  const env = makeEnv();
+  assert.equal((await call(env, "start_review", { ...work, panel: ["a", "b"] })).isError, true);
+  assert.equal((await call(env, "start_review", { ...work, tier: "review-3", panel: ["a", "a", "b"] })).isError, true);
+  assert.equal((await call(env, "start_review", { ...work, tier: "review-3", panel: ["a"] })).isError, true);
+  assert.equal(env.REFEREE.calls.length, 0);
+  assert.equal((await call(env, "start_review", { ...work, panel: "rotate" })).data.status, "done");
+});
+
+test("a body over 64 KB is refused while streaming, even without a Content-Length", async () => {
+  const env = makeEnv();
+  const big = new TextEncoder().encode("é".repeat(40_000)); // 80,000 bytes, only 40,000 characters
+  const stream = new ReadableStream({ start(c) { c.enqueue(big); c.close(); } });
+  const res = await worker.fetch(new Request("https://mcp.test/mcp", { method: "POST", headers: { "content-type": "application/json" }, body: stream, duplex: "half" }), env);
+  assert.equal(res.status, 413);
 });
