@@ -293,3 +293,33 @@ test("a body over 64 KB is refused while streaming, even without a Content-Lengt
   const res = await worker.fetch(new Request("https://mcp.test/mcp", { method: "POST", headers: { "content-type": "application/json" }, body: stream, duplex: "half" }), env);
   assert.equal(res.status, 413);
 });
+
+test("an alarm that throws isn't rethrown; a job stuck running is reported as interrupted; every failure says whether the free review was used", async () => {
+  const env = makeEnv({ START_WAIT_MS: "0" });
+  const s = await call(env, "start_review", work);
+  const obj = env.JOBS.objs.get(s.data.job_id);
+  await new Promise((r) => setTimeout(r, 20));
+  // A storage failure inside the alarm: alarm() resolves (no platform retry).
+  const real = obj.job.state.storage.get;
+  obj.job.state.storage.get = async () => { throw new Error("storage down"); };
+  await obj.job.alarm();
+  obj.job.state.storage.get = real;
+  // Stuck "running" well past the review timeout: shown as failed, "maybe" used.
+  const job = await obj.job.state.storage.get("job");
+  await obj.job.state.storage.put("job", { ...job, status: "running", started_at: Date.now() - 10 * 60_000 });
+  const g = await call(env, "get_review", { job_id: s.data.job_id });
+  assert.equal(g.data.status, "failed");
+  assert.equal(g.data.free_review_used, "maybe");
+  assert.match(g.data.error, /may have used/);
+  assert.equal(g.data.started_at, undefined);
+  // A bad start request is refused cleanly.
+  const bad = await env.JOBS.get("x".repeat(32)).fetch("https://job/start", { method: "POST", body: "not json" });
+  assert.equal(bad.status, 400);
+  // Refused by the service: "no"; answer that fails the checks: "yes".
+  const refused = makeEnv({}, async () => new Response(JSON.stringify({ error: "busy" }), { status: 429 }));
+  assert.equal((await call(refused, "start_review", work)).data.free_review_used, "no");
+  const forged = makeEnv({}, okAnswer({ key: evil }));
+  const f = await call(forged, "start_review", work);
+  assert.equal(f.data.free_review_used, "yes");
+  assert.match(f.data.error, /probably used/);
+});

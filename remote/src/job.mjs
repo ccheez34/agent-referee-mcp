@@ -3,19 +3,30 @@
 // start_review stores the request and sets an alarm; the alarm sends it to Agent Referee's internal free-review
 // route, checks the signed receipt against the pinned key and the exact text, then deletes the task and output.
 // get_review reads the result (waiting up to ~40 s for it). Everything is deleted 24 hours after the job started.
-import { sha256Hex, verifyReviewOutcome, verifySignature } from "agent-referee-client";
+import { verifyReviewOutcome, verifySignature } from "agent-referee-client";
 import { publicKeys } from "./keys.mjs";
 
 const KEEP_MS = 24 * 3600_000;
 const REVIEW_TIMEOUT_MS = 330_000; // longer than the service's own reviewer budget plus its queue wait
 
+const STUCK_MS = REVIEW_TIMEOUT_MS + 120_000; // a review still "running" after this was interrupted
 const TIERS = ["review", "review-3"];
 const NOT_USED = "Your free review wasn't used.";
+const MAYBE_USED = "It may have used one of today's free reviews.";
+
+/** HMAC-SHA256 keyed with INTERNAL_TOKEN (start_review refuses to run without it), hex. */
+async function keyedHash(env, label, value) {
+  const enc = new TextEncoder();
+  const key = await crypto.subtle.importKey("raw", enc.encode(`agent-referee-remote|${env.INTERNAL_TOKEN ?? ""}`), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const sig = new Uint8Array(await crypto.subtle.sign("HMAC", key, enc.encode(`${label}|${value}`)));
+  return [...sig].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
 
 /** The id sent to Agent Referee for the person: a keyed hash of ChatGPT's id, so the raw id is never stored. */
 export async function callerIdFor(env, subject) {
-  return subject ? (await sha256Hex(`${env.INTERNAL_TOKEN ?? ""}|caller|${subject}`)).slice(0, 40) : null;
+  return subject ? (await keyedHash(env, "caller", subject)).slice(0, 40) : null;
 }
+const ownerFor = (env, subject) => keyedHash(env, "owner", subject);
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const json = (status, body) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -38,8 +49,8 @@ export class ReviewJob {
     const st = this.state.storage;
     if (url.pathname === "/start" && req.method === "POST") {
       if (await st.get("job")) return json(409, { error: "This job already exists." });
-      const b = await req.json();
-      if (!TIERS.includes(b.tier)) return json(400, { error: "Unknown tier." });
+      const b = await req.json().catch(() => null);
+      if (!b || typeof b.id !== "string" || !TIERS.includes(b.tier) || typeof b.task !== "string" || typeof b.output !== "string") return json(400, { error: "Bad job request." });
       const created = this.now();
       await st.put("job", {
         id: b.id,
@@ -48,7 +59,7 @@ export class ReviewJob {
         created,
         expires: created + KEEP_MS,
         // Only a hash of the person's id is kept, to make sure the same person reads the result.
-        owner: b.subject ? await sha256Hex(`${this.env.INTERNAL_TOKEN ?? ""}|owner|${b.subject}`) : null,
+        owner: b.subject ? await ownerFor(this.env, b.subject) : null,
       });
       // Kept only until the review has been sent and checked. The person's id is kept only as a keyed hash.
       await st.put("input", { task: b.task, output: b.output, title: b.title, criteria: b.criteria, panel: b.panel, caller: await callerIdFor(this.env, b.subject) });
@@ -63,12 +74,16 @@ export class ReviewJob {
       let job = await st.get("job");
       if (!job || this.now() >= job.expires) return missing;
       // A job started by a known person can only be read with that person's id.
-      if (job.owner && (!subject || job.owner !== (await sha256Hex(`${this.env.INTERNAL_TOKEN ?? ""}|owner|${subject}`)))) return missing;
+      if (job.owner && (!subject || job.owner !== (await ownerFor(this.env, subject)))) return missing;
       while ((job.status === "queued" || job.status === "running") && this.now() < deadline) {
         await sleep(Math.min(1000, Math.max(1, deadline - this.now())));
         job = (await st.get("job")) ?? job;
+        if (this.now() >= job.expires) return missing;
       }
-      const { owner, expires, attempted, ...visible } = job;
+      // A review that never finished (its alarm couldn't complete) is reported as interrupted, not running forever.
+      if ((job.status === "queued" || job.status === "running") && this.now() - (job.started_at ?? job.created) > STUCK_MS)
+        job = { ...job, status: "failed", error: `The review was interrupted before it finished. ${MAYBE_USED} Start a new one with start_review.`, free_review_used: "maybe" };
+      const { owner, expires, attempted, started_at, ...visible } = job;
       return json(200, visible);
     }
     return json(404, { error: "Unknown job action." });
@@ -78,10 +93,13 @@ export class ReviewJob {
     try {
       await this.runAlarm();
     } catch (e) {
-      // Storage trouble: the platform retries the alarm a few times with backoff. The attempted flag (written
-      // before any review is sent) means a retry never sends the review again.
+      // Never rethrown, so the platform doesn't retry it. A job left unfinished is reported as interrupted by
+      // /status, and the attempted flag (written before any review is sent) means nothing is ever sent twice.
       console.error(`review job alarm: ${String(e?.message ?? e).slice(0, 200)}`);
-      throw e;
+      try {
+        const job = await this.state.storage.get("job");
+        if (job) await this.state.storage.setAlarm(job.expires); // still clean up after 24 hours
+      } catch {}
     }
   }
 
@@ -96,18 +114,19 @@ export class ReviewJob {
     }
     if (job.attempted) {
       // The alarm ran before and didn't finish (the object restarted mid-review). Never send the review twice.
-      await this.finish(job, { status: "failed", error: "The review was interrupted before it finished. Start a new one with start_review." });
+      await this.finish(job, { status: "failed", error: `The review was interrupted before it finished. ${MAYBE_USED} Start a new one with start_review.`, free_review_used: "maybe" });
       return;
     }
     job.attempted = true;
     job.status = "running";
+    job.started_at = this.now();
     await st.put("job", job);
     const input = await st.get("input");
     let outcome;
     try {
-      outcome = input ? await this.run(job.tier, input) : { status: "failed", error: "The review's input is missing. Start a new one." };
+      outcome = input ? await this.run(job.tier, input) : { status: "failed", error: `The review's input is missing. ${NOT_USED} Start a new one.`, free_review_used: "no" };
     } catch (e) {
-      outcome = { status: "failed", error: `The review couldn't be completed: ${String(e?.message ?? e).slice(0, 200)}` };
+      outcome = { status: "failed", error: `The review couldn't be completed (${String(e?.message ?? e).slice(0, 200)}). ${MAYBE_USED}`, free_review_used: "maybe" };
     }
     await this.finish(job, outcome);
   }
@@ -135,7 +154,8 @@ export class ReviewJob {
         signal: AbortSignal.timeout(REVIEW_TIMEOUT_MS),
       });
     } catch (e) {
-      return { status: "failed", error: `Agent Referee didn't answer in time (${String(e?.message ?? e).slice(0, 120)}). ${NOT_USED} Try again.` };
+      // The service gives the allowance back when a review doesn't complete, but it may still have been running.
+      return { status: "failed", error: `Agent Referee didn't answer in time (${String(e?.message ?? e).slice(0, 120)}). ${MAYBE_USED} Try again later.`, free_review_used: "maybe" };
     }
     const data = await res.json().catch(() => null);
     if (!res.ok) {
@@ -146,15 +166,19 @@ export class ReviewJob {
         http_status: res.status,
         busy: res.status === 503 && !!data?.busy,
         ...(retry ? { retry_after_seconds: retry } : {}),
-        error: res.status === 401 || res.status === 404 ? `The hosted server isn't connected to Agent Referee correctly (an operator problem). ${NOT_USED}` : /wasn't used|Nothing was charged/.test(said) ? said : `${said} ${NOT_USED}`,
+        error: res.status === 401 || res.status === 404 ? `The hosted server isn't connected to Agent Referee correctly (an operator problem). ${NOT_USED}` : /wasn't used/.test(said) ? said : `${said} ${NOT_USED}`,
+        free_review_used: "no",
       };
     }
     const receipt = data?.receipt;
     const signed = await verifySignature(receipt, publicKeys(env)).catch(() => false);
-    const check = await verifyReviewOutcome(receipt, { task: input.task, output: input.output, tier, ...(Array.isArray(input.panel) && input.panel.every((m) => typeof m === "string") ? { panel: input.panel } : {}) });
+    const check = receipt?.payload
+      ? await verifyReviewOutcome(receipt, { task: input.task, output: input.output, tier, ...(Array.isArray(input.panel) && input.panel.every((m) => typeof m === "string") ? { panel: input.panel } : {}) }).catch(() => ({ problems: ["The receipt's review data is malformed."] }))
+      : { problems: ["The answer has no receipt."] };
     const problems = [...(signed ? [] : ["The receipt's signature doesn't check out against Agent Referee's pinned key."]), ...check.problems];
     if (receipt?.payload?.funding !== "free") problems.push('The receipt doesn\'t say funding: "free".');
-    if (problems.length) return { status: "failed", error: "Agent Referee's answer didn't pass the checks, so it isn't shown as a result.", problems };
+    // The service did run a review here (and counted it), but its answer can't be trusted, so it isn't shown.
+    if (problems.length) return { status: "failed", error: "Agent Referee's answer didn't pass the checks, so it isn't shown as a result. This probably used one of today's free reviews.", problems, free_review_used: "yes" };
     // Everything shown comes from the signed, checked receipt, not from the rest of the answer.
     const p = receipt.payload;
     return {
@@ -163,7 +187,7 @@ export class ReviewJob {
       verdict: p.result?.verdict,
       tally: p.result?.tally,
       votes: p.votes,
-      free: data.free,
+      free: data.free, // the allowance left today, as the service reported it (not part of the signed receipt)
       receipt,
       checked: "The receipt's signature was checked against Agent Referee's pinned key, and it was confirmed to be about exactly the task and output that were sent.",
     };

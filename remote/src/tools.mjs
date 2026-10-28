@@ -65,13 +65,14 @@ function present(job) {
     };
   if (job.status === "failed")
     return {
-      summary: `The review didn't complete, and the free review wasn't used: ${job.error}`,
+      summary: `The review didn't complete: ${job.error}`,
       ...base,
       error: job.error,
       ...(job.problems ? { problems: job.problems } : {}),
       ...(job.busy ? { busy: true } : {}),
       ...(job.retry_after_seconds ? { retry_after_seconds: job.retry_after_seconds } : {}),
-      free_review_used: false,
+      // "no", "maybe" (interrupted or timed out) or "yes" (a review ran but its answer failed the checks).
+      free_review_used: job.free_review_used ?? "no",
     };
   return { summary: "The review is still running.", ...base, next: "Call get_review again with the same job_id. Reviews usually take 10-90 seconds, sometimes up to about 5 minutes." };
 }
