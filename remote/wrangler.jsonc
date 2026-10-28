@@ -30,8 +30,8 @@
       "vars": {
         "REFEREE_URL": "https://agent-referee-staging.fairplayclub.workers.dev",
         "REMOTE_PAUSED": "false",
-        // Staging signs receipts with its own key: put its public key here (from the staging /pubkey page).
-        "EXTRA_PUBLIC_KEYS": "STAGING_PUBLIC_KEY"
+        // Staging signs receipts with its own key (key ID 56906115c6857d27, from the staging /pubkey page).
+        "EXTRA_PUBLIC_KEYS": "HQxMeqRdQ3ARUm/WAhdIRWyp8HE/QJf6yHb+lwFxeUg="
       }
     }
   }
