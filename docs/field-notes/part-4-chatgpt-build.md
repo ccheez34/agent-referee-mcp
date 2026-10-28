@@ -6,21 +6,16 @@ Claude wrote the code, the briefs and this report. The owner chose what to run, 
 
 ## 1. What the checks were
 
-| Code checked | Panel | Runs | Verdict each time |
+| Code checked | Panel | Runs | Verdict |
 |---|---|---|---|
-| Usage stats: ledger counters and the admin page | fixed | 1 | fail (Opus needs_changes, GPT fail, Argon fail) |
-| Internal free-review route for the hosted server | fixed | 1 | needs_changes (Argon cannot_assess) |
-| Hosted server: review job, first version | fixed | 1 | needs_changes, 3 to 0 |
-| Hosted server: the three MCP tools | fixed | 1 | needs_changes (Argon pass) |
-| Hosted server: HTTP entry point, same file each time | fixed | 3 | needs_changes, 1 pass and 2 needs_changes |
+| Usage stats: ledger counters and the admin page | fixed | 1 | fail |
+| Internal free-review route for the hosted server | fixed | 1 | needs_changes |
+| Hosted server: review job, first version | fixed | 1 | needs_changes |
+| Hosted server: the three MCP tools | fixed | 1 | needs_changes |
+| Hosted server: HTTP entry point, same file each time | fixed | 3 | needs_changes |
 | Hosted server: review job, after fixes, same file each time | rotate | 3 | needs_changes |
 
-Across the day's ten checks there were no pass verdicts and no splits.
-
-- **Opus:** needs_changes on all 9 of its seats.
-- **GPT-6 Luna:** 1 fail and 9 needs_changes, out of 10.
-- **Gemini 4 Argon:** 5 pass, 2 needs_changes, 1 fail and 1 cannot_assess, out of 9.
-- **Rotation-only models:** Claude Sonnet 5.5 (1 seat, needs_changes) and Gemini 3.7 Flash (1 seat, pass).
+Across the day's ten checks there were no pass verdicts and no splits. Every vote, and each reviewer's totals, are in section 6.
 
 ## 2. What they caught that the tests didn't
 
@@ -83,3 +78,73 @@ What this small sample suggests (six runs on two files, so treat it as observati
 6. **Run twice, not five times.** A second run separates stable issues from noise. More runs mostly repeat themselves.
 
 None of this replaces tests. Every fix above landed with a test. The ChatGPT server went from 9 to 13 tests and the main server from 165 to 170, all passing on the owner's PC.
+
+## 6. The data
+
+### Every vote
+
+Fixed panel: Opus = Claude Opus 5.5, GPT = GPT-6 Luna, Argon = Gemini 4 Argon. nc = needs_changes, ca = cannot_assess.
+
+| # | Code | Opus | GPT | Argon | Verdict |
+|---|---|---|---|---|---|
+| 1 | Usage stats | nc | fail | fail | fail |
+| 2 | Internal route | nc | nc | ca | nc |
+| 3 | Review job v1 | nc | nc | nc | nc |
+| 4 | MCP tools | nc | nc | pass | nc |
+| 5 | Entry point | nc | nc | pass | nc |
+| 6 | Entry point (same file) | nc | nc | pass | nc |
+| 7 | Entry point (same file) | nc | nc | pass | nc |
+
+Rotating panel, review job v2, the same file each time:
+
+| # | Anthropic | OpenAI | Google | Verdict |
+|---|---|---|---|---|
+| 8 | Sonnet: nc | GPT: nc | Argon: pass | nc |
+| 9 | Opus: nc | GPT: nc | Argon: nc | nc |
+| 10 | Opus: nc | GPT: nc | Flash: pass | nc |
+
+**Totals: 1 fail and 9 needs_changes; no pass and no split.** By seat:
+
+| Reviewer | Seats | pass | nc | fail | ca |
+|---|---|---|---|---|---|
+| Claude Opus 5.5 | 9 | 0 | 9 | 0 | 0 |
+| GPT-6 Luna | 10 | 0 | 9 | 1 | 0 |
+| Gemini 4 Argon | 9 | 5 | 2 | 1 | 1 |
+| Claude Sonnet 5.5 | 1 | 0 | 1 | 0 | 0 |
+| Gemini 3.7 Flash | 1 | 1 | 0 | 0 | 0 |
+
+Every pass vote of the day (6 of 30) came from a Gemini model.
+
+### How the rotation drew
+
+`rotate` picks one model per company at random from the service's pool. The pool has Claude Opus, Sonnet and Haiku for Anthropic (Haiku is left out for long inputs like these), GPT-6 Luna only for OpenAI, and Gemini 4 Argon and Gemini 3.7 Flash for Google.
+
+| Company | Drawn in 3 runs |
+|---|---|
+| Anthropic | Opus 2, Sonnet 1 |
+| OpenAI | GPT-6 Luna 3 (the only OpenAI model in the pool) |
+| Google | Argon 2, Flash 1 |
+
+So GPT-6 Luna sits on every rotated panel; only the Anthropic and Google seats vary. Three draws say nothing about the draw's fairness.
+
+### The most common findings
+
+Each reviewer raising an issue counts once per run. "Could have" is how many seats saw code with that problem. Claude counted these by reading each issue, and reviewers word points differently, so treat them as close, not exact.
+
+| Finding | Code | Raised | Could have | By |
+|---|---|---|---|---|
+| The alarm rethrows errors, so the platform retries it | review job | 8 | 12 | every model except Gemini 3.7 Flash |
+| Requirements belong to another file, so they can't be checked | stats, internal route | 6 | 6 | all three, both times |
+| Body size counted in characters, or read in full before refusing | entry point | 6 | 9 | Opus 3, GPT 3; Argon 0 |
+| Logging could leak request content or the id | entry point | 6 | 9 | Opus 3, GPT 3; Argon 0 |
+| Ids with spaces rejected | entry point, internal route | 6 | 12 | Opus 4, GPT 2 |
+| A failure doesn't say the free review wasn't used | review job | 7 | 12 | GPT 3, Argon 2, Opus 1, Sonnet 1 |
+| The id hash isn't a proper keyed hash (HMAC), or is unkeyed without the secret | review job v2 | 5 | 9 | Opus 2, GPT 2, Sonnet 1 |
+| Size limit is 64,000 bytes, not 64 KiB | entry point | 4 | 9 | Opus 3, GPT 1 |
+| The raw user id is stored | review job v1 | 3 | 3 | all three |
+| Missing headers for allowed origins on GET / | entry point | 3 | 9 | GPT 3 |
+| The `free` count shown comes from the unsigned answer | review job v2 | 3 | 9 | Opus 2, Sonnet 1 |
+| Expired jobs can still be read, or aren't deleted | review job | 3 | 12 | Opus 1, GPT 2 |
+
+One finding pointed the other way. In run 10, Opus noted that saying "your free review wasn't used" after a timeout may be untrue, while GPT in the same run asked for that sentence on more failures. Both were reading the same brief. Opus was right; Claude had reached the same conclusion after run 8 and changed the brief (section 3).
+
