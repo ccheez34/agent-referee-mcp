@@ -42,6 +42,13 @@ Don't use it when:
 - Keep the task neutral: state the requirements and claims to check, not how good the work is or what is at stake. Wording like that is known to make reviewers more lenient.
 - Attach evidence where it exists (test output, load-test results, sources) and ask whether it supports each claim. Reviewers can't run anything themselves.
 
+## Several reviews in a row
+
+To check one piece several times (a different panel each run, so the runs are independent) or several pieces in turn, and the user runs the reviews from a terminal (for example with a review script, because only they sign payments):
+- Write all the commands into one script file (`.cmd` on Windows, `.sh` elsewhere) that runs them one after another and saves each result to its own file. Then give the user one line to run. Long commands pasted one by one get cut off or mistyped, and saved results can be read straight from the files instead of being pasted back.
+- Use full paths, and check that the folder the script runs from really contains the review script before handing it over.
+- Give each run a different panel: one model from each of three AI companies, varied between runs, with repeats of a model allowed.
+
 ## Reporting the result
 
 - Lead with the verdict: `pass`, `needs_changes`, `fail`, `cannot_assess`, or `split` (review-3 only: the reviewers disagreed).
@@ -60,6 +67,7 @@ Use `verify_receipt` (free, offline) with the receipt and the exact `task` and `
 ## If something goes wrong
 
 - A refused review ("nothing was charged") cost nothing. Report the reason. If the service says it is busy, wait the number of seconds it gives and retry once.
+- "Reviewer ran out of tokens before finishing its answer": not charged. A reviewer's answer hit its length limit, which is likelier on long pieces near the 12,000-character limit. Retry with another panel, or split the piece. Tell the user which model it was, since it may point to a limit the service should raise.
 - "Daily spending cap reached": tell the user; only they can raise `AGENT_REFEREE_DAILY_LIMIT_USD`.
 - "Used today's free reviews" or "free reviews are used up for everyone": tell the user. They reset at 00:00 UTC; a configured wallet can pay instead, but ask first.
 - If the call timed out on your side, the review may still have finished: check `saved_receipts` before paying for another.
