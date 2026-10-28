@@ -69,7 +69,7 @@ Use `verify_receipt` (free, offline) with the receipt and the exact `task` and `
 ## If something goes wrong
 
 - A refused review ("nothing was charged") cost nothing. Report the reason. If the service says it is busy, wait the number of seconds it gives and retry once.
-- "Reviewer ran out of tokens before finishing its answer": not charged. A reviewer's answer hit its length limit, which is likelier on long pieces near the 12,000-character limit. Retry with another panel, or split the piece. Tell the user which model it was, since it may point to a limit the service should raise.
+- "Reviewer ran out of tokens before finishing its answer": not charged. A reviewer's answer hit its length limit, which is likelier on long pieces near the 12,000-character limit. Retry with another panel, or split the piece. Tell the user which model it was, since it may point to a limit the service should raise. Opt-in models (DeepSeek, Qwen, Mistral and the like) also run out of tokens or time out more often on long pieces, so prefer default-pool models for long work.
 - "Daily spending cap reached": tell the user; only they can raise `AGENT_REFEREE_DAILY_LIMIT_USD`.
 - "Used today's free reviews" or "free reviews are used up for everyone": tell the user. They reset at 00:00 UTC; a configured wallet can pay instead, but ask first.
 - If the call timed out on your side, the review may still have finished: check `saved_receipts` before paying for another.
