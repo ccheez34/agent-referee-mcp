@@ -102,7 +102,13 @@ export default {
       log: (m) => console.error(String(m).split("\n")[0].slice(0, 200)),
       heartbeatMs: 3_600_000, // no progress stream over plain JSON answers
     });
-    await server.receive(text);
+    try {
+      await server.receive(text);
+    } catch (e) {
+      // receive() already turns errors into JSON-RPC errors; this is a second net so the Worker never crashes.
+      console.error(`mcp receive failed: ${String(e?.message ?? e).split("\n")[0].slice(0, 200)}`);
+      return json(500, { jsonrpc: "2.0", id: null, error: { code: -32603, message: "Internal error." } }, cors);
+    }
     // receive() writes exactly once per request (a batch's answers go out as one array), or not at all when the
     // request held only notifications or responses: accepted, nothing to answer.
     if (!out.length) return new Response(null, { status: 202, headers: cors });
