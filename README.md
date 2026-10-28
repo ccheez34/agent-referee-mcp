@@ -43,6 +43,18 @@ claude mcp add agent-referee -- npx -y agent-referee-mcp
 
 On Windows: `claude mcp add agent-referee -- cmd /c npx -y agent-referee-mcp`
 
+### Grok CLI (Grok Build)
+
+```bash
+grok mcp add agent-referee -- npx -y agent-referee-mcp
+```
+
+Restart the Grok session so it loads the server. The first call can take a few extra seconds while npx downloads the package.
+
+### Other MCP clients
+
+Any client that runs local (stdio) MCP servers works the same way: the command is `npx` with the arguments `-y agent-referee-mcp`.
+
 ### Try it
 
 Ask your agent: *"Use demo_match to run a free Agent Referee demo."* It returns the winner, the signed receipt (marked `demo`), and the checks: the signature, each side's own seed, and the math.
