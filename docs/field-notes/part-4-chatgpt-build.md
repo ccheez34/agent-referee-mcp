@@ -19,7 +19,7 @@ Claude wrote the code, the briefs and this report. The owner chose what to run, 
 | Review job, version 2, same file | rotate | 3 | needs_changes ×3 |
 | Review job, version 3, same file | rotate | 5 | needs_changes ×4, pass ×1 |
 
-That's 1 fail, 13 needs_changes and 1 pass, with no splits. The one pass came on a file that four other runs, on identical text, said needed changes (section 4).
+That's 1 fail, 13 needs_changes and 1 pass, with no splits. The one pass came on a file that four other runs, on identical text, said needed changes (section 5).
 
 ## 2. What they caught that the tests didn't
 
@@ -53,7 +53,18 @@ Other problems the reviewers found, all confirmed and fixed with a test:
 - **Stuck jobs:** the version-2 fix for them only *reported* the interruption instead of cleaning up.
 - **The start race:** the fix carried a code comment claiming "no gap between the check and the writes". That wasn't true, because hashing happened in between. GPT or Sonnet caught the race in four of the five version-3 runs, and twice called out the comment itself.
 
-## 4. What repeating a check on identical input showed
+## 4. A limit of the service: one review, one piece
+
+A single review reads up to 4,000 characters of task and 12,000 of output, so anything longer has to be split. Splitting changes what a review can see:
+
+- **Each piece goes to a fresh review.** Naming the same models for part 1 and part 2 gets the same *models*, not the same reviewer. Nothing carries over between reviews, so no reviewer ever reads both parts.
+- **Problems that span pieces get missed or wrongly flagged.** That's what happened to the stats check (section 3): its requirement sat in one file and its code in the other. All three reviewers marked it missing.
+- **Reviewers say when they can't see enough.** In check 2, Gemini 4 Argon voted cannot_assess: it saw the file was labelled "File 2 of 2", and the code it needed was in the other file. Opus and GPT made the same point inside their needs_changes votes.
+- **Even this report was split.** Part 4 and its data page are reviewed separately, and the data page's reviewers never see this story.
+
+Until the service can review one piece of work in parts, the workaround is in the brief. Say what the other parts do, list only the requirements this part can show, and check cross-part claims yourself.
+
+## 5. What repeating a check on identical input showed
 
 The owner ran three files several times each, without changing them: the entry point three times on the fixed panel, version 2 three times on the rotating panel, and version 3 five times on the rotating panel.
 
@@ -80,7 +91,7 @@ The owner ran three files several times each, without changing them: the entry p
 
 **Past two runs, repeats mostly repeated.** Each extra run on unchanged code added about one new point, usually minor. Fixing the code and checking the new version found more.
 
-## 5. Lessons, added to Part 3's list
+## 6. Lessons, added to Part 3's list
 
 1. **Scope each brief to its file.** If code is split across reviews, list only that file's requirements. Name the others as "handled elsewhere, not shown".
 2. **Check the brief before the code.** A requirement that is impossible or dishonest gets enforced like any other.
@@ -89,6 +100,7 @@ The owner ran three files several times each, without changing them: the entry p
 5. **Don't trust one run, even a pass.** One run in five passed code that the other four flagged. Two runs agreeing is a much better signal than one.
 6. **Rotate the panel for anything important,** and replace a reviewer that passes everything rather than trusting it.
 7. **Treat "raised every time" as reliable, not as important.** Weigh what a finding would break.
-8. **After two runs, fix and re-check rather than rerun.** Each fix round found more than extra runs on unchanged code did.
+8. **Split work knowing no reviewer sees the whole.** Brief each part about the others, and check cross-part claims yourself.
+9. **After two runs, fix and re-check rather than rerun.** Each fix round found more than extra runs on unchanged code did.
 
 None of this replaces tests. Every fix above landed with a test. The ChatGPT server went from 9 to 14 tests and the main server from 165 to 170, all passing. The owner's PC has confirmed the main server's 170, and the ChatGPT server's tests as of its last sync.
