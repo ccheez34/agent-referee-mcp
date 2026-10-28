@@ -1,0 +1,31 @@
+{
+  "name": "agent-referee-mcp",
+  "version": "0.1.0",
+  "mcpName": "io.github.ccheez34/agent-referee",
+  "description": "MCP server for Agent Referee: free demo tie-breaks between AI agents, paid sealed review of an agent's own output, and offline checks of signed receipts.",
+  "type": "module",
+  "bin": {
+    "agent-referee-mcp": "bin/agent-referee-mcp.mjs"
+  },
+  "main": "src/server.mjs",
+  "exports": {
+    ".": "./src/server.mjs"
+  },
+  "files": ["bin", "src", "README.md", "CHANGELOG.md", "LICENSE"],
+  "scripts": {
+    "test": "node --test test/protocol.test.mjs test/store.test.mjs test/e2e.test.mjs"
+  },
+  "dependencies": {
+    "agent-referee-client": "^0.8.0"
+  },
+  "devDependencies": {
+    "x402-fetch": "^1.2.0"
+  },
+  "engines": { "node": ">=18" },
+  "repository": { "type": "git", "url": "git+https://github.com/ccheez34/agent-referee-mcp.git" },
+  "homepage": "https://github.com/ccheez34/agent-referee-mcp#readme",
+  "bugs": { "url": "https://github.com/ccheez34/agent-referee-mcp/issues" },
+  "author": "ccheez34 <hello@agentreferee.ai>",
+  "keywords": ["mcp", "mcp-server", "model-context-protocol", "ai-agents", "x402", "tie-breaker", "ai-review", "llm-as-judge", "commit-reveal", "usdc", "base"],
+  "license": "MIT"
+}

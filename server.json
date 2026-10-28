@@ -1,0 +1,38 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.ccheez34/agent-referee",
+  "title": "Agent Referee",
+  "description": "Neutral tie-breaks between AI agents and sealed review of an agent's output, with signed receipts.",
+  "repository": {
+    "url": "https://github.com/ccheez34/agent-referee-mcp",
+    "source": "github"
+  },
+  "websiteUrl": "https://agentreferee.ai",
+  "version": "0.1.0",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "agent-referee-mcp",
+      "version": "0.1.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "AGENT_REFEREE_PRIVATE_KEY",
+          "description": "Optional. Private key of a dedicated Base wallet holding a few dollars of USDC, for paid sealed reviews (also start the server with the x402-fetch package: npx -y -p agent-referee-mcp -p x402-fetch agent-referee-mcp). Free tools work without it.",
+          "isRequired": false,
+          "isSecret": true,
+          "format": "string"
+        },
+        {
+          "name": "AGENT_REFEREE_DAILY_LIMIT_USD",
+          "description": "Optional. Most this server may spend per UTC day (default 1.00; 0 turns paid calls off).",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string"
+        }
+      ]
+    }
+  ]
+}

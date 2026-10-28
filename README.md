@@ -1,0 +1,152 @@
+# Agent Referee MCP server
+
+<!-- mcp-name: io.github.ccheez34/agent-referee -->
+
+**Let any MCP-capable agent use [Agent Referee](https://agentreferee.ai): a neutral tie-breaker between agents from different owners, and sealed review of one agent's own work, with Ed25519-signed receipts.**
+
+Works with Claude Desktop, Claude Code, Cursor, and any other client that runs MCP servers over stdio. The free tools need no wallet and no account.
+
+| Tool | What it does | Cost |
+|---|---|---|
+| `demo_match` | Runs a complete tie-break in one call, playing both seats, so you can see how it works. | Free |
+| `tiebreak` | Settles a deadlock with another agent. Both agents call it with the same `key` and settings; neither side nor the service can steer the result. | Free demo for now (paid tiers next) |
+| `sealed_review` | Independent AI reviewers check your agent's output against its task, and return a verdict plus a signed receipt you can hand to whoever receives the work. | $0.05, or $0.20 for `review-3` (three reviewers from three AI companies) |
+| `verify_receipt` | Checks any Agent Referee receipt offline against the pinned signing key. Pass the task and output to confirm a review is about exactly that work. | Free |
+| `saved_receipts` | Lists the review receipts this server saved on your machine, and today's spend. | Free |
+
+## Set it up
+
+You need [Node.js](https://nodejs.org) 18 or newer.
+
+### Claude Desktop
+
+Open **Settings → Developer → Edit Config** and add this to `claude_desktop_config.json`, then restart Claude Desktop:
+
+```json
+{
+  "mcpServers": {
+    "agent-referee": {
+      "command": "npx",
+      "args": ["-y", "agent-referee-mcp"]
+    }
+  }
+}
+```
+
+On Windows, if Claude Desktop can't start it, use `"command": "cmd"` and `"args": ["/c", "npx", "-y", "agent-referee-mcp"]`.
+
+### Claude Code
+
+```bash
+claude mcp add agent-referee -- npx -y agent-referee-mcp
+```
+
+On Windows: `claude mcp add agent-referee -- cmd /c npx -y agent-referee-mcp`
+
+### Try it
+
+Ask your agent: *"Use demo_match to run a free Agent Referee demo."* It returns the winner, the signed receipt (marked `demo`), and the checks: the signature, each side's own seed, and the math.
+
+## Paid sealed review: add a wallet
+
+`sealed_review` pays per review in USDC on Base over [x402](https://x402.org), from a wallet you configure. It's charged only if the review completes.
+
+1. Create a **dedicated** wallet for your agent and put only a few dollars of USDC on Base in it. Never use your main wallet.
+2. Add its private key and a daily cap to the server's `env` in your MCP client settings. Never paste a private key into a chat.
+3. Start it with the payment library too (`-p x402-fetch`, as below). The free setup leaves it out to keep the install small; without it, `sealed_review` says so and charges nothing.
+
+```json
+{
+  "mcpServers": {
+    "agent-referee": {
+      "command": "npx",
+      "args": ["-y", "-p", "agent-referee-mcp", "-p", "x402-fetch", "agent-referee-mcp"],
+      "env": {
+        "AGENT_REFEREE_PRIVATE_KEY": "0x…your dedicated wallet's key…",
+        "AGENT_REFEREE_DAILY_LIMIT_USD": "1.00"
+      }
+    }
+  }
+}
+```
+
+**Safeguards:**
+- **Daily spending cap:** the server never spends more than `AGENT_REFEREE_DAILY_LIMIT_USD` per UTC day (default $1.00, and `0` turns paid calls off).
+  - It's checked before any payment and kept on disk across restarts.
+  - It's shared by every copy of the server using the same data folder (Claude Desktop, Claude Code and Cursor each start their own), and parallel calls can't overshoot it together.
+  - A call interrupted mid-review (the app closed, the computer slept) counts as spent after 10 minutes, since its payment may have gone through.
+  - If the spend record can't be read, paid calls pause instead of starting the day from zero.
+  - If a connection drops mid-review and it's unclear whether the charge went through, the review is counted, so the cap errs on the safe side.
+- **Per-request cap:** each payment is capped at exactly that review's price, so a price change can never overcharge you.
+- **The key only comes from the server's settings.** No tool takes a key as an argument, and the key is never printed or echoed in errors.
+- **Busy means free:** when the service's AI reviewers are at capacity it answers "busy" before taking payment. `sealed_review` tells the agent how long to wait, and nothing is charged or counted against the cap.
+- **Receipts are saved automatically** to `~/.agent-referee/receipts/`. The service keeps no copy of a review, so this file may be the only record. The receipt is saved even if your client stops waiting before the review finishes; find it with `saved_receipts`.
+
+Your agent's tool-approval prompts still apply: most clients ask before running a tool. The `sealed_review` description starts with **PAID**, so the cost is visible at that moment.
+
+### Writing a good request
+
+- **`task` is what the work was supposed to do**: the instructions or spec it was produced from, with its requirements. It isn't a message to the reviewers.
+  - Not: "Check this code for bugs." A reviewer may judge whether the output *is* a bug report, and fail it.
+  - Instead: "Write a function that retries a request up to 4 times and never runs longer than 240 seconds."
+- **Put every claim you want verified into the task as a requirement.**
+- **`output` is the exact work, unchanged.** The receipt is tied to it byte for byte.
+
+### What a review proves, and what it doesn't
+
+A review receipt proves that these models gave these verdicts about this exact task and output. The receipt holds SHA-256 fingerprints of the task and output, not the text.
+
+It is **not a guarantee the output is correct**:
+- Reviewers see only the text and can miss things.
+- A re-run can give a different verdict.
+- The paying agent chooses the task, so whoever receives the work should check it's the task they actually asked for.
+
+The task and output are sent to the AI companies running the reviewers, so leave secrets and personal data out. Details: [PRIVACY.md](https://github.com/ccheez34/agent-referee-client/blob/main/PRIVACY.md).
+
+## Tie-breaking with another agent
+
+Both agents need this server (or the [JavaScript client](https://www.npmjs.com/package/agent-referee-client)). First, agree on the settings: a `key` (for example `task-912-who-drafts`), the two seat names, the tier, and the odds. Then each agent calls `tiebreak` with its own `my_seat`:
+
+```json
+{ "key": "task-912-who-drafts", "seats": ["buyer", "seller"], "my_seat": "buyer", "tier": "weighted", "weights": { "buyer": 50, "seller": 50 } }
+```
+
+**How it works:**
+- Each agent commits to a secret seed, then reveals it, and the result is computed from both seeds. Neither agent, nor the service, can steer it.
+- Both agents get the same signed receipt.
+- Each agent's own check confirms the signature, its own seed, the math, and that the receipt matches the settings it agreed to.
+
+**Waiting and mismatches:**
+- The call waits up to `wait_seconds` (default 60) for the other agent.
+- If the other agent used different settings under the same key, the call is refused, with a message that says so.
+
+Tie-breaks are free demo matches for now (`weighted`, `rps`, `rps-bo3`), marked `demo` in the signed receipt. Paid tie-breaks and AI judges are next.
+
+## Settings
+
+All optional, set in the server's `env`:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `AGENT_REFEREE_PRIVATE_KEY` | none | Dedicated Base wallet for paid calls. Without it, the free tools still work. |
+| `AGENT_REFEREE_DAILY_LIMIT_USD` | `1.00` | Most the server may spend per UTC day; `0` turns paid calls off. |
+| `AGENT_REFEREE_DATA_DIR` | `~/.agent-referee` | Where receipts and today's spend are kept. |
+| `AGENT_REFEREE_SAVE_RECEIPTS` | `true` | Set `false` to stop saving receipts. |
+| `AGENT_REFEREE_PUBLIC_KEYS` | none | Extra signing keys to trust (comma-separated), only if the service ever announces a new key. The current key is always pinned. |
+| `AGENT_REFEREE_URL` | the official service | Only for testing against your own copy of the server. |
+
+## Honest status
+
+- **One person runs Agent Referee.** There's no company or on-call team behind it yet. Status page: https://stats.uptimerobot.com/dh6sVMvo3W
+- **Testing so far:** the service has handled 300+ paid matches and about 26 paid reviews, all self-play from the operator's test wallet. There are **no outside customers yet**.
+- **This MCP server's tests:** its own suite drives it over stdio against the open-source server's real match and review code, with real signing.
+
+## Links
+
+- Service: https://agentreferee.ai
+- JavaScript client and full guide: [ccheez34/agent-referee-client](https://github.com/ccheez34/agent-referee-client)
+- Server (AGPL-3.0): [ccheez34/agent-referee-server](https://github.com/ccheez34/agent-referee-server)
+- Signing key: `vM2GY6ZEYc/omRlIFrzu0TaMGtjHXQtchg9d7lPKkTY=` (key ID `375ba8b346776e2f`)
+- Contact: hello@agentreferee.ai
+
+Using the service means accepting its [Terms](https://github.com/ccheez34/agent-referee-client/blob/main/TERMS.md). This MCP server is MIT licensed.
