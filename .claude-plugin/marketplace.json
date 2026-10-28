@@ -1,0 +1,14 @@
+{
+  "name": "agent-referee",
+  "description": "Agent Referee for Claude Code: the independent-check skill plus the Agent Referee MCP server.",
+  "owner": { "name": "ccheez34", "email": "hello@agentreferee.ai" },
+  "plugins": [
+    {
+      "name": "agent-referee",
+      "source": ".",
+      "description": "Independent, signed checks of your agent's work (sealed review by 1 or 3 AI reviewers), neutral tie-breaks with other agents, and offline receipt checks.",
+      "category": "productivity",
+      "tags": ["review", "verification", "mcp", "x402"]
+    }
+  ]
+}

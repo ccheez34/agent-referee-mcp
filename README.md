@@ -103,9 +103,22 @@ It is **not a guarantee the output is correct**:
 
 The task and output are sent to the AI companies running the reviewers, so leave secrets and personal data out. Details: [PRIVACY.md](https://github.com/ccheez34/agent-referee-client/blob/main/PRIVACY.md).
 
-## Skill: independent-check
+## Claude plugin and skill
 
-[`skills/independent-check/SKILL.md`](skills/independent-check/SKILL.md) is an Agent Skill that teaches an agent when a sealed review is worth paying for, how to write a neutral request, and how to report the verdict honestly. In Claude Code, copy the folder into `~/.claude/skills/` (or your project's `.claude/skills/`). In the Claude apps, upload it as a skill.
+This repo is also a Claude Code plugin. It installs the MCP server and the `independent-check` skill together; the skill teaches Claude when a sealed review is worth paying for, how to write a neutral request, and how to report the verdict honestly.
+
+**Claude Code:**
+
+```
+/plugin marketplace add ccheez34/agent-referee-mcp
+/plugin install agent-referee@agent-referee
+```
+
+Then run `/reload-plugins` (or restart Claude Code). Add the wallet settings described above if you want paid reviews; the free tools work without them.
+
+**Claude apps (skill only):** download `independent-check.zip` from the [latest release](https://github.com/ccheez34/agent-referee-mcp/releases/latest) and upload it under Customize → Skills. Add this MCP server as well (see "Set it up"), since the skill calls its tools.
+
+The skill itself is in [`skills/independent-check/SKILL.md`](skills/independent-check/SKILL.md).
 
 ## Tie-breaking with another agent
 

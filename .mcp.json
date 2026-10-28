@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "agent-referee": {
+      "command": "npx",
+      "args": ["-y", "agent-referee-mcp"]
+    }
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "name": "agent-referee",
+  "displayName": "Agent Referee",
+  "version": "0.1.0",
+  "description": "Independent, signed checks of your agent's work (sealed review by 1 or 3 AI reviewers), neutral tie-breaks with other agents, and offline receipt checks.",
+  "author": { "name": "ccheez34", "email": "hello@agentreferee.ai" },
+  "homepage": "https://agentreferee.ai",
+  "repository": "https://github.com/ccheez34/agent-referee-mcp",
+  "license": "MIT",
+  "keywords": ["review", "verification", "mcp", "x402", "receipts"]
+}
