@@ -273,7 +273,7 @@ export function createTools({ config, makeClient, makePayingFetch, budget, recei
   /** A free review: the service pays (a small daily allowance per address). No wallet, no spend, nothing to settle. */
   async function freeReview(args, tier, progress) {
     const ref = makeClient({ url: config.url, publicKeys: pinned });
-    if (typeof ref._call !== "function") throw new ToolError("This version of agent-referee-client can't reach the free review route. Update agent-referee-mcp.");
+    if (typeof ref._call !== "function") throw new ToolError("This version of agent-referee-client can't reach the free review route. Update agent-referee-mcp. Nothing was charged.");
     const body = { task: args.task, output: args.output, title: args.title, criteria: args.criteria, panel: args.panel };
     let r;
     try {
@@ -283,7 +283,13 @@ export function createTools({ config, makeClient, makePayingFetch, budget, recei
       throw new ToolError(explain(e, { free: true }));
     }
     if (!r?.result || !r?.receipt) throw new ToolError("The service answered, but its review couldn't be read. Nothing was charged (it was a free review); try again.");
-    const check = await ref.verifyReview(r.receipt, { task: args.task, output: args.output, tier, panel: args.panel });
+    let check;
+    try {
+      check = await ref.verifyReview(r.receipt, { task: args.task, output: args.output, tier, panel: args.panel });
+    } catch (e) {
+      check = { ok: false, problems: [`The receipt couldn't be checked (${String(e?.message ?? e).slice(0, 200)}).`], trusts: [] };
+    }
+    check.problems = Array.isArray(check.problems) ? check.problems : [];
     if (r.receipt?.payload?.funding !== "free") {
       check.problems.push('A free review\'s receipt should say "funding": "free".');
       check.ok = false;
@@ -378,7 +384,8 @@ export function createTools({ config, makeClient, makePayingFetch, budget, recei
     } catch (e) {
       saveProblem = `Couldn't save the receipt to disk (${String(e?.message ?? e).slice(0, 200)}). Save the receipt from this response yourself: the service keeps no copy.`;
     }
-    const today = await budget.status().catch(() => null);
+    // A free review never touches the local spending cap, so it doesn't report it either.
+    const today = paid ? await budget.status().catch(() => null) : null;
 
     const ok = r.check?.ok === true;
     return {

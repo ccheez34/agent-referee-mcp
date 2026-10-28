@@ -468,7 +468,7 @@ test("sealed_review with a wallet and free: true uses a free review and spends n
   assert.equal(r.data.receipt.payload.funding, "free");
   assert.equal(r.data.receipt.payload.payer, null);
   assert.equal(svc.stats.paidRequests, before.paidRequests);
-  assert.match(r.data.spent_today, /^\$0\.00 of/);
+  assert.equal(r.data.spent_today, undefined, "a free review doesn't report the local spending cap");
   // Without free: true, a wallet means paid, as before.
   const paid = await c.call("sealed_review", { task, output: "22.2" });
   assert.equal(paid.data.paid.amount, "$0.05");
