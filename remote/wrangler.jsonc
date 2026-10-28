@@ -1,0 +1,19 @@
+{
+  // Hosted MCP server for ChatGPT and other remote-only clients. Deploy from this folder: npx wrangler deploy
+  // Secret (the same value as on the agent-referee Worker): npx wrangler secret put INTERNAL_TOKEN
+  "name": "agent-referee-mcp-remote",
+  "main": "src/worker.mjs",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": { "bindings": [{ "name": "JOBS", "class_name": "ReviewJob" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ReviewJob"] }],
+  // Calls the main Worker directly (no public internet hop). The INTERNAL_TOKEN is still checked.
+  "services": [{ "binding": "REFEREE", "service": "agent-referee" }],
+  "routes": [{ "pattern": "mcp.agentreferee.ai", "custom_domain": true }],
+  "vars": {
+    "REFEREE_URL": "https://agentreferee.ai",
+    // "true" stops new reviews (start_review answers that it's paused); get_review and verify_receipt keep working.
+    "REMOTE_PAUSED": "false"
+  },
+  "observability": { "enabled": true }
+}

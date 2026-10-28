@@ -140,6 +140,10 @@ Then run `/reload-plugins` (or restart Claude Code). Add the wallet settings des
 
 The skill itself is in [`skills/independent-check/SKILL.md`](skills/independent-check/SKILL.md).
 
+## Hosted server (ChatGPT and other URL-only clients)
+
+[`remote/`](remote/README.md) holds a hosted version of this server for clients that can only connect to a URL, such as ChatGPT. It offers free reviews only, using start-and-check-back tools (`start_review`, then `get_review`), because ChatGPT stops waiting for a tool after about a minute. It isn't deployed yet.
+
 ## Tie-breaking with another agent
 
 Both agents need this server (or the [JavaScript client](https://www.npmjs.com/package/agent-referee-client)). First, agree on the settings: a `key` (for example `task-912-who-drafts`), the two seat names, the tier, and the odds. Then each agent calls `tiebreak` with its own `my_seat`:

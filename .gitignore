@@ -15,3 +15,5 @@ ramp-test-data/
 review-doc-data/
 review-parallel-data/
 model-limit-data/
+.wrangler/
+.dev.vars
