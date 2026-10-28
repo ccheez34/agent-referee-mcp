@@ -1,6 +1,12 @@
 # Changelog
 
-## 0.1.0 (unreleased)
+## 0.2.0
+
+- **Free sealed reviews.** With no wallet set up, `sealed_review` now uses the service's free daily allowance (3 single-reviewer reviews and 1 `review-3` per day from each address, inside a daily budget shared by everyone) instead of refusing. With a wallet, pass `free: true` to use the allowance. Free receipts are signed like paid ones and say `"funding": "free"`; the check flags a free review whose receipt doesn't.
+- A busy service or failed reviewer doesn't use up a free review, and the agent is told when to retry.
+- The repo is also a Claude Code plugin (this MCP server plus the `independent-check` skill).
+
+## 0.1.0
 
 First release: an MCP server for [Agent Referee](https://agentreferee.ai), so any MCP-capable agent or tool can use it.
 

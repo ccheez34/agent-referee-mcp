@@ -57,7 +57,8 @@ export async function startFakeService({ joinWaitSeconds = 15, reviewAnswer } = 
   };
 
   // The AI providers: answer with the queued verdict for each model. Everything else passes through.
-  const stats = { reviewCalls: 0, paidRequests: 0, settled: 0, unpaidAttempts: 0, payers: [], busy: false };
+  const stats = { reviewCalls: 0, paidRequests: 0, settled: 0, unpaidAttempts: 0, payers: [], busy: false, freeRequests: 0, freeUsed: { review: 0, "review-3": 0 } };
+  const FREE_PER_DAY = { review: 3, "review-3": 1 };
   const answerFor = reviewAnswer ?? (() => JSON.stringify({ verdict: "pass", confidence: "high", issues: [], reasoning: "Checked against the task." }));
   const realFetch = globalThis.fetch;
   globalThis.fetch = async (input, init) => {
@@ -160,6 +161,31 @@ export async function startFakeService({ joinWaitSeconds = 15, reviewAnswer } = 
         stats.payers.push(payer);
         const settlement = Buffer.from(JSON.stringify({ success: true, transaction: `0x${"ab".repeat(32)}`, network: "base", payer })).toString("base64");
         return send(res, 200, { review_id: payload.review_id, tier, result: payload.result, votes, receipt, note: "test" }, { "x-payment-response": settlement });
+      }
+      // Free reviews: the real route's per-address allowance (3 + 1), no payment, receipts marked funding: free.
+      if (req.method === "POST" && (path === "/free/review" || path === "/free/review-3")) {
+        const tier = path.slice("/free/".length);
+        stats.freeRequests++;
+        if (stats.busy) {
+          res.setHeader("retry-after", "12");
+          return send(res, 503, { error: "busy: the AI reviewers are at capacity. Your free review wasn't used.", busy: true, retry_after_s: 12 });
+        }
+        const v = review.validateReview(body, tier);
+        if (!v.ok) return send(res, 400, { error: `${v.error} Your free review wasn't used.` });
+        if (stats.freeUsed[tier] >= FREE_PER_DAY[tier])
+          return send(res, 429, { error: `You've used today's free ${tier === "review-3" ? "review-3" : "single-reviewer"} reviews (${FREE_PER_DAY[tier]} per day from one address). They reset at 00:00 UTC. Paid reviews (POST /review or /review-3 with x402) have no daily allowance.` });
+        const commitment = await review.reviewCommitment(tier, env, v.value.panel);
+        let votes;
+        try {
+          const fast = { sleep: (ms) => new Promise((r) => setTimeout(r, Math.min(ms, 20))) };
+          votes = await Promise.all(commitment.models.map((mm, i) => review.runOneReviewer({ ANTHROPIC_API_KEY: env.ANTHROPIC_API_KEY, OPENROUTER_API_KEY: env.OPENROUTER_API_KEY }, mm, i + 1, v.value, 2000, fast)));
+        } catch (e) {
+          return send(res, 502, { error: `A reviewer didn't return a usable verdict (${String(e?.message ?? e).slice(0, 200)}). Your free review wasn't used; try again.` });
+        }
+        const used = ++stats.freeUsed[tier];
+        const payload = await review.reviewPayload({ tier, input: v.value, commitment, votes, network: env.NETWORK, id: logic.randomToken(12), funding: "free" });
+        const receipt = await signReceipt(payload, SIGNING_KEY, PUBLIC_KEY);
+        return send(res, 200, { review_id: payload.review_id, tier, result: payload.result, votes, receipt, free: { used_today: used, per_day: FREE_PER_DAY[tier], left_today: FREE_PER_DAY[tier] - used }, note: "test" });
       }
       return send(res, 404, { error: `No route: ${req.method} ${path}` });
     } catch (e) {

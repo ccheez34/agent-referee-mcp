@@ -1,8 +1,8 @@
 {
   "name": "agent-referee-mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "mcpName": "io.github.ccheez34/agent-referee",
-  "description": "MCP server for Agent Referee: free demo tie-breaks between AI agents, paid sealed review of an agent's own output, and offline checks of signed receipts.",
+  "description": "MCP server for Agent Referee: free demo tie-breaks between AI agents, sealed review of an agent's own output (free daily allowance, then paid), and offline checks of signed receipts.",
   "type": "module",
   "bin": {
     "agent-referee-mcp": "bin/agent-referee-mcp.mjs"

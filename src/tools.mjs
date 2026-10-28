@@ -60,8 +60,8 @@ function checkArgs(args, schema) {
 }
 
 /** Turn a service or network error into a message an agent can act on. Never includes anything secret. */
-function explain(e, { paid = false, demo = false, dropped = false } = {}) {
-  const none = demo ? "This is a free demo, so nothing is ever charged." : paid ? "Nothing was charged." : "";
+function explain(e, { paid = false, demo = false, dropped = false, free = false } = {}) {
+  const none = demo ? "This is a free demo, so nothing is ever charged." : free ? "Free reviews are never charged." : paid ? "Nothing was charged." : "";
   if (e instanceof RefereeError) {
     const msg = String(e.message || `HTTP ${e.status}`);
     const already = /nothing was charged|not charged/i.test(msg);
@@ -261,9 +261,35 @@ export function createTools({ config, makeClient, makePayingFetch, budget, recei
         description: 'Optional weighted criteria, e.g. [{"name": "accuracy", "weight": 3}]. Each reviewer scores 0-10 per criterion.',
       },
       panel: panelSchema,
+      free: {
+        type: "boolean",
+        description:
+          "Use one of today's free reviews instead of paying (each address gets 3 single-reviewer and 1 review-3 a day, inside a daily budget shared by everyone, so they can run out). Without a wallet set up, reviews are always free. With a wallet, reviews are paid unless this is true.",
+      },
     },
     additionalProperties: false,
   };
+
+  /** A free review: the service pays (a small daily allowance per address). No wallet, no spend, nothing to settle. */
+  async function freeReview(args, tier, progress) {
+    const ref = makeClient({ url: config.url, publicKeys: pinned });
+    if (typeof ref._call !== "function") throw new ToolError("This version of agent-referee-client can't reach the free review route. Update agent-referee-mcp.");
+    const body = { task: args.task, output: args.output, title: args.title, criteria: args.criteria, panel: args.panel };
+    let r;
+    try {
+      progress(`Sending to ${tier === "review-3" ? "three reviewers" : "the reviewer"} (free review)…`);
+      r = await ref._call("POST", `/free/${tier}`, body);
+    } catch (e) {
+      throw new ToolError(explain(e, { free: true }));
+    }
+    if (!r?.result || !r?.receipt) throw new ToolError("The service answered, but its review couldn't be read. Nothing was charged (it was a free review); try again.");
+    const check = await ref.verifyReview(r.receipt, { task: args.task, output: args.output, tier, panel: args.panel });
+    if (r.receipt?.payload?.funding !== "free") {
+      check.problems.push('A free review\'s receipt should say "funding": "free".');
+      check.ok = false;
+    }
+    return { ...r, check };
+  }
 
   async function sealedReview(args, { progress }) {
     checkArgs(args, reviewSchema);
@@ -273,10 +299,7 @@ export function createTools({ config, makeClient, makePayingFetch, budget, recei
     const tier = args.tier ?? "review";
     const price = PRICES[tier];
 
-    if (!config.privateKey)
-      throw new ToolError(
-        "Sealed review is paid ($0.05, or $0.20 for review-3) and this MCP server has no wallet set up. The owner adds AGENT_REFEREE_PRIVATE_KEY (a dedicated Base wallet holding a few dollars of USDC) to the server's env in the MCP client settings. Never paste a private key into chat. Nothing was charged.",
-      );
+    if (args.free === true || !config.privateKey) return reviewResult(args, tier, await freeReview(args, tier, progress), null, []);
     if (!/^0x[0-9a-fA-F]{64}$/.test(config.privateKey))
       throw new ToolError("AGENT_REFEREE_PRIVATE_KEY is set but isn't a 0x-prefixed 64-character hex key. The owner needs to fix it in the MCP server settings. Nothing was charged.");
 
@@ -330,6 +353,13 @@ export function createTools({ config, makeClient, makePayingFetch, budget, recei
       );
     }
 
+    return reviewResult(args, tier, r, paidRecord(price, payer, settlement), warnings);
+  }
+
+  const paidRecord = (price, payer, settlement) => ({ amount: usd(price), wallet: payer.wallet ?? null, transaction: settlement?.transaction ?? null, network: settlement?.network ?? null });
+
+  /** Save the receipt and describe the review for the agent. paid is null for a free review. */
+  async function reviewResult(args, tier, r, paid, warnings) {
     const record = {
       summary: `${tier} ${r.result.verdict}${args.title ? ` — ${args.title}` : ""}`,
       review_id: r.review_id,
@@ -339,7 +369,7 @@ export function createTools({ config, makeClient, makePayingFetch, budget, recei
       votes: r.votes,
       receipt: r.receipt,
       check: r.check,
-      paid: { amount: usd(price), wallet: payer.wallet ?? null, transaction: settlement?.transaction ?? null, network: settlement?.network ?? null },
+      ...(paid ? { paid } : { free: r.free ?? true }),
     };
     let receiptFile = null;
     let saveProblem = null;
@@ -352,7 +382,7 @@ export function createTools({ config, makeClient, makePayingFetch, budget, recei
 
     const ok = r.check?.ok === true;
     return {
-      summary: `${ok ? "" : "WARNING: the receipt check FAILED (see check.problems); don't rely on this review. "}Verdict: ${r.result.verdict}${tier === "review-3" ? ` (${Object.entries(r.result.tally ?? {}).filter(([, n]) => n).map(([v, n]) => `${n} ${v}`).join(", ")})` : ""}.`,
+      summary: `${ok ? "" : "WARNING: the receipt check FAILED (see check.problems); don't rely on this review. "}Verdict: ${r.result.verdict}${tier === "review-3" ? ` (${Object.entries(r.result.tally ?? {}).filter(([, n]) => n).map(([v, n]) => `${n} ${v}`).join(", ")})` : ""}.${paid ? "" : ` Free review${Number.isFinite(r.free?.left_today) ? ` (${r.free.left_today} of this kind left today)` : ""}.`}`,
       verdict: r.result.verdict,
       unanimous: r.result.unanimous,
       tally: r.result.tally,
@@ -364,7 +394,7 @@ export function createTools({ config, makeClient, makePayingFetch, budget, recei
       receipt_file: receiptFile,
       ...(saveProblem ? { save_problem: saveProblem } : {}),
       ...(warnings.length ? { warnings } : {}),
-      paid: record.paid,
+      ...(paid ? { paid } : { free: { ...(r.free ?? {}), note: "A free review: nothing was charged, and the receipt says funding: free." } }),
       spent_today: today ? `${usd(today.spent_micro)} of ${usd(today.limit_micro)} (UTC day)` : undefined,
       how_to_share:
         "Give the receipt to whoever receives the work, together with the exact task and output. They can check it for free with the verify_receipt tool or the client's verifyReview(receipt, { task, output }). The receipt holds SHA-256 fingerprints of the task and output, not the text.",
@@ -508,11 +538,11 @@ export function createTools({ config, makeClient, makePayingFetch, budget, recei
     },
     {
       name: "sealed_review",
-      title: "Sealed review of your own output (paid)",
+      title: "Sealed review of your own output (free daily allowance, then paid)",
       description:
-        "PAID ($0.05, or $0.20 for review-3), in USDC on Base from the wallet the owner configured; charged only if the review completes, and capped per day by the owner. Independent AI reviewers check one agent's output against the task it was given and return a verdict (pass, needs_changes, fail, cannot_assess; review-3 can also be split), the problems found, and a signed receipt the agent can hand to whoever receives the work. Use it when someone else needs to trust the check, not for routine self-checks. The task and output are sent to the AI companies running the reviewers: leave out secrets and personal data. Can take up to a few minutes. The receipt is saved to disk automatically.",
+        "FREE OR PAID. Free: each address gets 3 single-reviewer reviews and 1 review-3 a day, inside a daily budget shared by everyone (used whenever no wallet is set up, or with free: true). Paid: $0.05, or $0.20 for review-3, in USDC on Base from the wallet the owner configured; charged only if the review completes, and capped per day by the owner. Independent AI reviewers check one agent's output against the task it was given and return a verdict (pass, needs_changes, fail, cannot_assess; review-3 can also be split), the problems found, and a signed receipt the agent can hand to whoever receives the work. Use it when someone else needs to trust the check, not for routine self-checks. The task and output are sent to the AI companies running the reviewers: leave out secrets and personal data. Can take up to a few minutes. The receipt is saved to disk automatically.",
       inputSchema: reviewSchema,
-      annotations: { title: "Sealed review (paid)", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+      annotations: { title: "Sealed review", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
       handler: sealedReview,
     },
     {

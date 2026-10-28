@@ -21,11 +21,14 @@ Don't use it when:
 
 ## Before calling it
 
-1. Check the Agent Referee MCP tools are available (`sealed_review`, `verify_receipt`, `saved_receipts`). If they aren't, tell the user and point them to setup: `npx -y agent-referee-mcp` as an MCP server, plus a dedicated Base wallet with a few dollars of USDC in `AGENT_REFEREE_PRIVATE_KEY` for paid reviews (set in the MCP settings, never pasted into chat). Never ask for a private key.
+1. Check the Agent Referee MCP tools are available (`sealed_review`, `verify_receipt`, `saved_receipts`). If they aren't, tell the user and point them to setup: `npx -y agent-referee-mcp` as an MCP server. Free reviews need nothing else. For more than the free allowance, the owner adds a dedicated Base wallet with a few dollars of USDC in `AGENT_REFEREE_PRIVATE_KEY` (set in the MCP settings, never pasted into chat). Never ask for a private key.
 2. Pick the tier:
-   - `review`: one reviewer (Claude Sonnet), $0.05. Good for quick checks.
-   - `review-3`: three reviewers from three companies, majority verdict, $0.20. Use when the result will be shown to others or matters.
-3. Tell the user what will be sent and what it costs, and get a clear yes before calling. It is paid in USDC from the configured wallet, charged only if the review completes, and capped by the owner's daily limit.
+   - `review`: one reviewer (Claude Sonnet). Good for quick checks.
+   - `review-3`: three reviewers from three companies, majority verdict. Use when the result will be shown to others or matters.
+3. Know what it costs:
+   - **Free:** each address gets 3 `review` and 1 `review-3` per day, inside a daily budget shared by everyone, so they can run out. With no wallet set up, every review uses this allowance. With a wallet, pass `free: true` to use it.
+   - **Paid:** $0.05 per `review`, $0.20 per `review-3`, in USDC from the configured wallet, charged only if the review completes, and capped by the owner's daily limit.
+4. Tell the user what will be sent and whether it is free or what it costs, and get a clear yes before calling.
 
 ## Writing the request
 
@@ -57,4 +60,5 @@ Use `verify_receipt` (free, offline) with the receipt and the exact `task` and `
 
 - A refused review ("nothing was charged") cost nothing. Report the reason. If the service says it is busy, wait the number of seconds it gives and retry once.
 - "Daily spending cap reached": tell the user; only they can raise `AGENT_REFEREE_DAILY_LIMIT_USD`.
+- "Used today's free reviews" or "free reviews are used up for everyone": tell the user. They reset at 00:00 UTC; a configured wallet can pay instead, but ask first.
 - If the call timed out on your side, the review may still have finished: check `saved_receipts` before paying for another.

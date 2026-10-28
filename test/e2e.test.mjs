@@ -31,7 +31,7 @@ test("stdio: handshake, the five tools, and stdout carries nothing but JSON-RPC"
     assert.ok(t.description.length > 80, `${t.name} explains itself`);
     assert.ok(t.annotations, `${t.name} has annotations`);
   }
-  assert.match(list.result.tools.find((t) => t.name === "sealed_review").description, /^PAID/, "the paid tool says so first");
+  assert.match(list.result.tools.find((t) => t.name === "sealed_review").description, /^FREE OR PAID/, "the tool says what it costs first");
   assert.equal(list.result.tools.find((t) => t.name === "verify_receipt").annotations.readOnlyHint, true);
   assert.match(s.stderr, /Paid reviews: off/);
   assert.equal(await s.close(), 0);
@@ -386,13 +386,8 @@ test("sealed_review: a reviewer failure is not charged and frees the budget", { 
   assert.equal(ok.isError, false, ok.text);
 });
 
-test("sealed_review: no wallet, a malformed key, a cap of 0 or bad input never reach the service", { skip }, async () => {
+test("sealed_review: a malformed key, a cap of 0 or bad input never reach the service", { skip }, async () => {
   const before = { ...svc.stats };
-  const none = await reviewServer({ privateKey: null });
-  const r1 = await none.call("sealed_review", { task, output: "22.2" });
-  assert.equal(r1.isError, true);
-  assert.match(r1.text, /no wallet set up.*AGENT_REFEREE_PRIVATE_KEY.*Never paste a private key into chat/s);
-
   const badKey = await reviewServer({ privateKey: "0x1234" });
   const r2 = await badKey.call("sealed_review", { task, output: "22.2" });
   assert.match(r2.text, /isn't a 0x-prefixed 64-character hex key/);
@@ -435,4 +430,62 @@ test("sealed_review: the service's own refusal (a panel it won't accept) is pass
   assert.equal(r.isError, true);
   assert.match(r.data.error, /panel.*Nothing was charged/s);
   assert.equal(svc.stats.settled, before);
+});
+
+test("sealed_review without a wallet uses today's free reviews: checked receipt marked free, nothing paid, a clear message when they run out", { skip }, async () => {
+  svc.stats.freeUsed = { review: 0, "review-3": 0 };
+  const before = { ...svc.stats };
+  const none = await reviewServer({ privateKey: null });
+  const r = await none.call("sealed_review", { task, output: "22.2", title: "free one" });
+  assert.equal(r.isError, false, r.text);
+  assert.equal(r.data.verdict, "pass");
+  assert.equal(r.data.check.ok, true, JSON.stringify(r.data.check));
+  assert.equal(r.data.receipt.payload.funding, "free");
+  assert.equal(r.data.paid, undefined);
+  assert.equal(r.data.free.left_today, 2);
+  assert.match(r.data.summary, /Free review \(2 of this kind left today\)/);
+  assert.ok(r.data.receipt_file, "the receipt is saved like a paid one");
+  assert.equal(svc.stats.paidRequests, before.paidRequests, "no paid request");
+  assert.equal(svc.stats.unpaidAttempts, before.unpaidAttempts, "never touched the paid route");
+  await none.call("sealed_review", { task, output: "22.2" });
+  await none.call("sealed_review", { task, output: "22.2" });
+  const out = await none.call("sealed_review", { task, output: "22.2" });
+  assert.equal(out.isError, true);
+  assert.match(out.text, /used today's free single-reviewer reviews \(3 per day/);
+  // review-3 has its own allowance of one.
+  assert.equal((await none.call("sealed_review", { task, output: "22.2", tier: "review-3" })).isError, false);
+  assert.match((await none.call("sealed_review", { task, output: "22.2", tier: "review-3" })).text, /free review-3 reviews \(1 per day/);
+  const saved = await none.call("saved_receipts", {});
+  assert.equal(saved.isError, false);
+});
+
+test("sealed_review with a wallet and free: true uses a free review and spends nothing", { skip }, async () => {
+  svc.stats.freeUsed = { review: 0, "review-3": 0 };
+  const before = { ...svc.stats };
+  const c = await reviewServer();
+  const r = await c.call("sealed_review", { task, output: "22.2", free: true });
+  assert.equal(r.isError, false, r.text);
+  assert.equal(r.data.receipt.payload.funding, "free");
+  assert.equal(r.data.receipt.payload.payer, null);
+  assert.equal(svc.stats.paidRequests, before.paidRequests);
+  assert.match(r.data.spent_today, /^\$0\.00 of/);
+  // Without free: true, a wallet means paid, as before.
+  const paid = await c.call("sealed_review", { task, output: "22.2" });
+  assert.equal(paid.data.paid.amount, "$0.05");
+  assert.equal(paid.data.receipt.payload.funding, undefined);
+});
+
+test("a busy service refuses a free review without using it", { skip }, async () => {
+  svc.stats.freeUsed = { review: 0, "review-3": 0 };
+  const none = await reviewServer({ privateKey: null });
+  svc.stats.busy = true;
+  try {
+    const r = await none.call("sealed_review", { task, output: "22.2" });
+    assert.equal(r.isError, true);
+    assert.match(r.text, /busy/i);
+    assert.match(r.text, /Try again in about 12 s/);
+  } finally {
+    svc.stats.busy = false;
+  }
+  assert.equal(svc.stats.freeUsed.review, 0);
 });

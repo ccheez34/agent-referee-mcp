@@ -10,7 +10,7 @@ Works with Claude Desktop, Claude Code, Cursor, and any other client that runs M
 |---|---|---|
 | `demo_match` | Runs a complete tie-break in one call, playing both seats, so you can see how it works. | Free |
 | `tiebreak` | Settles a deadlock with another agent. Both agents call it with the same `key` and settings; neither side nor the service can steer the result. | Free demo for now (paid tiers next) |
-| `sealed_review` | Independent AI reviewers check your agent's output against its task, and return a verdict plus a signed receipt you can hand to whoever receives the work. | $0.05, or $0.20 for `review-3` (three reviewers from three AI companies) |
+| `sealed_review` | Independent AI reviewers check your agent's output against its task, and return a verdict plus a signed receipt you can hand to whoever receives the work. | Free: 3 reviews and 1 `review-3` a day per address (no wallet). Then $0.05, or $0.20 for `review-3` (three reviewers from three AI companies) |
 | `verify_receipt` | Checks any Agent Referee receipt offline against the pinned signing key. Pass the task and output to confirm a review is about exactly that work. | Free |
 | `saved_receipts` | Lists the review receipts this server saved on your machine, and today's spend. | Free |
 
@@ -47,6 +47,14 @@ On Windows: `claude mcp add agent-referee -- cmd /c npx -y agent-referee-mcp`
 
 Ask your agent: *"Use demo_match to run a free Agent Referee demo."* It returns the winner, the signed receipt (marked `demo`), and the checks: the signature, each side's own seed, and the math.
 
+## Free sealed reviews
+
+With no wallet set up, `sealed_review` uses the free daily allowance: **3 single-reviewer reviews and 1 `review-3` per day from each address** (IP address, or /64 block for IPv6), reset at 00:00 UTC. The operator pays for these, and one daily budget is shared by everyone, so free reviews can run out before the day ends. When they do, the tool says so.
+
+- Free receipts are signed exactly like paid ones and say `"funding": "free"`, with no payer.
+- A busy service or a failed reviewer doesn't use up a free review.
+- With a wallet set up, reviews are paid unless the agent passes `free: true`.
+
 ## Paid sealed review: add a wallet
 
 `sealed_review` pays per review in USDC on Base over [x402](https://x402.org), from a wallet you configure. It's charged only if the review completes.
@@ -82,7 +90,7 @@ Ask your agent: *"Use demo_match to run a free Agent Referee demo."* It returns 
 - **Busy means free:** when the service's AI reviewers are at capacity it answers "busy" before taking payment. `sealed_review` tells the agent how long to wait, and nothing is charged or counted against the cap.
 - **Receipts are saved automatically** to `~/.agent-referee/receipts/`. The service keeps no copy of a review, so this file may be the only record. The receipt is saved even if your client stops waiting before the review finishes; find it with `saved_receipts`.
 
-Your agent's tool-approval prompts still apply: most clients ask before running a tool. The `sealed_review` description starts with **PAID**, so the cost is visible at that moment.
+Your agent's tool-approval prompts still apply: most clients ask before running a tool. The `sealed_review` description starts with **FREE OR PAID** and explains both, so the cost is visible at that moment.
 
 ### Writing a good request
 
