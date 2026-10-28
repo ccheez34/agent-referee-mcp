@@ -1,0 +1,19 @@
+{
+  "name": "agent-referee-remote-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Hosted (remote) MCP server for Agent Referee, for clients that need a URL instead of a local process, such as ChatGPT. Free sealed reviews with start-and-check-back tools.",
+  "type": "module",
+  "main": "src/worker.mjs",
+  "scripts": {
+    "test": "node --test test/remote.test.mjs",
+    "deploy": "wrangler deploy"
+  },
+  "dependencies": {
+    "agent-referee-client": "^0.8.0"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  },
+  "license": "MIT"
+}
