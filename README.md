@@ -163,6 +163,7 @@ All optional, set in the server's `env`:
 - Service: https://agentreferee.ai
 - JavaScript client and full guide: [ccheez34/agent-referee-client](https://github.com/ccheez34/agent-referee-client)
 - Server (AGPL-3.0): [ccheez34/agent-referee-server](https://github.com/ccheez34/agent-referee-server)
+- Field notes from 18 independent checks during launch: [docs/field-notes](docs/field-notes/README.md)
 - Signing key: `vM2GY6ZEYc/omRlIFrzu0TaMGtjHXQtchg9d7lPKkTY=` (key ID `375ba8b346776e2f`)
 - Contact: hello@agentreferee.ai
 
