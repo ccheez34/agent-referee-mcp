@@ -142,7 +142,7 @@ The skill itself is in [`skills/independent-check/SKILL.md`](skills/independent-
 
 ## Hosted server (ChatGPT and other URL-only clients)
 
-[`remote/`](remote/README.md) holds a hosted version of this server for clients that can only connect to a URL, such as ChatGPT. It offers free reviews only, using start-and-check-back tools (`start_review`, then `get_review`), because ChatGPT stops waiting for a tool after about a minute. It isn't deployed yet.
+[`remote/`](remote/README.md) holds a hosted version of this server for clients that can only connect to a URL, such as ChatGPT. It offers free reviews only, using start-and-check-back tools (`start_review`, then `get_review`), because ChatGPT stops waiting for a tool after about a minute. It's live at `https://mcp.agentreferee.ai/mcp` (no sign-in). Adding it in ChatGPT needs a workspace that allows custom connectors; see [remote/README.md](remote/README.md).
 
 ## Tie-breaking with another agent
 
