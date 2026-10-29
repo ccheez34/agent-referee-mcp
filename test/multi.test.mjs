@@ -84,10 +84,23 @@ test("sealed_review multi-part: mistakes are refused before any payment is set u
     [{ tier: "review-3x2", task: t, pieces: two, free: true }, /paid only/],
     [{ tier: "review-3", task: t, output: "x", pieces: two }, /pieces are for review-3x2 and review-3x3/],
     [{ tier: "review-3", task: t }, /output is empty/],
+    [{ tier: "review-3x2", task: t, pieces: two, panel: ["claude-sonnet-5-5"] }, /3 model ids from 3 different AI companies/],
+    [{ tier: "review-3x2", task: t, pieces: two, panel: [["a/x", "b/y"]] }, /3 model ids from 3 different AI companies/],
+    [{ tier: "review-3x2", task: t, pieces: two, panel: ["claude-sonnet-5-5", "anthropic/x", "claude-opus-5-5"] }, /3 model ids from 3 different AI companies/],
+    [{ tier: "review-3x2", task: t, pieces: two, criteria: [{ name: "a\nb", weight: 1 }] }, /text on one line/],
+    [{ tier: "review-3x2", task: t, pieces: two, criteria: [{ name: "   ", weight: 1 }] }, /text on one line/],
   ];
   for (const [args, re] of bad) await assert.rejects(review(args), re, JSON.stringify(args).slice(0, 80));
   assert.deepEqual(calls.pay, []);
   assert.deepEqual(calls.review, []);
+});
+
+test("sealed_review multi-part: good panels still go through", async () => {
+  for (const panel of ["rotate", ["claude-sonnet-5-5", "openai/gpt-6-luna", "google/gemini-4-argon"], [["claude-sonnet-5-5", "openai/gpt-6-luna", "google/gemini-4-argon"]]]) {
+    const { review, calls } = await setup(); // a fresh $1.00 daily cap each time
+    await review({ tier: "review-3x2", task: valid.given.task, pieces: valid.given.pieces, panel });
+    assert.deepEqual(calls.review[0].panel, panel);
+  }
 });
 
 test("sealed_review multi-part without a wallet says it's paid only and charges nothing", async () => {

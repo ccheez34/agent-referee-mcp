@@ -8,6 +8,17 @@ import { usd } from "./store.mjs";
 export const PRICES = { review: 50_000, "review-3": 200_000, "review-3x2": 600_000, "review-3x3": 700_000 };
 /** Multi-part tiers: how many pieces each takes. Paid only; three reviewers from three companies read every piece. */
 export const MULTI_PIECES = { "review-3x2": 2, "review-3x3": 3 };
+const companyOf = (m) => (m.includes("/") ? m.split("/")[0] : m.startsWith("claude") ? "anthropic" : "other");
+/** The multi-part tiers take exactly three reviewers from three AI companies: "rotate", one set of 3 model ids, or up
+ * to 5 such sets. Checked before any payment is set up (the service refuses the rest too, but only after the hold). */
+function multiPanelProblem(panel) {
+  if (panel === undefined || panel === "rotate") return null;
+  const err = 'For review-3x2 and review-3x3, panel must be "rotate", 3 model ids from 3 different AI companies, or up to 5 such sets.';
+  if (!Array.isArray(panel) || !panel.length) return err;
+  const okSet = (x) => Array.isArray(x) && x.length === 3 && x.every((m) => typeof m === "string" && m.length > 0 && m.length <= 80) && new Set(x).size === 3 && new Set(x.map(companyOf)).size === 3;
+  if (panel.every((x) => typeof x === "string")) return okSet(panel) ? null : err;
+  return panel.length <= 5 && panel.every(okSet) ? null : err;
+}
 const reviewersLabel = (tier) => (tier === "review" ? "the reviewer" : "three reviewers");
 
 const LABEL = { type: "string", pattern: "^[A-Za-z0-9_-]{1,32}$", description: "a seat label: letters, digits, _ or -, up to 32 characters" };
@@ -333,11 +344,14 @@ export function createTools({ config, makeClient, makePayingFetch, budget, recei
       if (total > 36000) throw new ToolError(`The pieces add up to ${total} characters; the most in all is 36,000. Nothing was charged.`);
       if (args.free === true) throw new ToolError(`${tier} is paid only: there's no free allowance for multi-part reviews. Use review or review-3 for a free review. Nothing was charged.`);
       if (!config.privateKey) throw new ToolError(`${tier} is paid only (${usd(PRICES[tier])}), and no wallet is set up for this server. The owner can add one (AGENT_REFEREE_PRIVATE_KEY, see the README). For a free check, use review or review-3 with output. Nothing was charged.`);
+      const pe = multiPanelProblem(args.panel);
+      if (pe) throw new ToolError(`${pe} Nothing was charged.`);
     } else {
       if (args.pieces !== undefined) throw new ToolError(`pieces are for review-3x2 and review-3x3; ${tier} takes one output. Nothing was charged.`);
       if (typeof args.output !== "string" || !args.output.trim()) throw new ToolError("output is empty.");
     }
     if (args.criteria && new Set(args.criteria.map((c) => c.name.trim())).size !== args.criteria.length) throw new ToolError("criteria names must be unique.");
+    if (args.criteria?.some((c) => !c.name.trim() || /[\n\r]/.test(c.name))) throw new ToolError("Each criteria name must be text on one line. Nothing was charged.");
     const price = PRICES[tier];
 
     if (!n && (args.free === true || !config.privateKey)) return reviewResult(args, tier, await freeReview(args, tier, progress), null, []);
