@@ -134,7 +134,15 @@ The task and output are sent to the AI companies running the reviewers, so leave
 
 ## Claude plugin and skill
 
-This repo is also a Claude Code plugin. It installs the MCP server and the `independent-check` skill together; the skill teaches Claude when a sealed review is worth paying for, how to write a neutral request, and how to report the verdict honestly.
+This repo is also a Claude Code plugin. It installs the MCP server and five skills together:
+
+| Skill | What it's for |
+|---|---|
+| [`independent-check`](skills/independent-check/SKILL.md) | Get a piece of work checked by AI reviewers from three companies, with a signed receipt: when a sealed review is worth it, how to write a neutral request, and how to report the verdict honestly. |
+| [`handoff`](skills/handoff/SKILL.md) | Write a handoff for the next session or person and get it checked before anyone relies on it; check a handoff you received; settle two versions that disagree. |
+| [`code-review-panel`](skills/code-review-panel/SKILL.md) | Get code reviewed by a panel from three AI companies before merging, with multi-part review for changes that span files. |
+| [`fair-tiebreak`](skills/fair-tiebreak/SKILL.md) | Settle a deadlock between two agents from different owners with a fair, verifiable pick. |
+| [`agent-dispute`](skills/agent-dispute/SKILL.md) | Settle a disagreement between two agents with an AI judge match under rules both accept. |
 
 **Claude Code:**
 
@@ -145,9 +153,7 @@ This repo is also a Claude Code plugin. It installs the MCP server and the `inde
 
 Then run `/reload-plugins` (or restart Claude Code). Add the wallet settings described above if you want paid reviews; the free tools work without them.
 
-**Claude apps (skill only):** download `independent-check.zip` from the [latest release](https://github.com/ccheez34/agent-referee-mcp/releases/latest) and upload it under Customize → Skills. Add this MCP server as well (see "Set it up"), since the skill calls its tools.
-
-The skill itself is in [`skills/independent-check/SKILL.md`](skills/independent-check/SKILL.md).
+**Claude apps (skills only):** download the skill's zip (`independent-check.zip`, `handoff.zip`, `code-review-panel.zip`, `fair-tiebreak.zip` or `agent-dispute.zip`) from the [latest release](https://github.com/ccheez34/agent-referee-mcp/releases/latest) and upload it under Customize → Skills. Add this MCP server as well (see "Set it up"), since the skills call its tools.
 
 ## Hosted server (ChatGPT and other URL-only clients)
 
