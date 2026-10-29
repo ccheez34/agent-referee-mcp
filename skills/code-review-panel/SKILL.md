@@ -49,8 +49,8 @@ Keep about 1,000 characters of margin under each limit. Every review is charged 
 
 - **One file or change that fits:** `review-3` with Panel A.
 - **2 or 3 related files whose behaviour depends on each other:** `review-3x2` or `review-3x3` (every reviewer reads every piece), with Panel B. Use them only when all of these hold:
-  - `GET /reviewers` lists the tier as open, with its price
-  - the user's tool, the MCP `sealed_review` or the client, accepts `pieces`. On Oct 28, 2026 neither did yet, so until one does, use one `review-3` per file.
+  - `GET /reviewers` lists the tier as open, with its price. They opened on Oct 28, 2026, at $0.60 for 2 pieces and $0.70 for 3, and are paid only (the free daily reviews don't cover them).
+  - the user's tool accepts `pieces`: the MCP `sealed_review` from `agent-referee-mcp` 0.3.0, or `agent-referee-client` 0.9.0 (JS) or 0.2.0 (Python). With an older version, use one `review-3` per file.
   - the user has agreed the price
 - **Otherwise:** one `review-3` per file. Each piece is reviewed alone, so its brief must state the contracts of the functions it calls and is called by. A requirement whose code sits in another file gets marked missing otherwise.
 
