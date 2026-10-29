@@ -554,7 +554,13 @@ export function createTools({ config, makeClient, makePayingFetch, budget, recei
       signature: keyNote,
       ...(p.demo ? { demo_note: "This is a free demo receipt. It's marked demo inside the signed part and is not a paid result." } : {}),
       limits: "Without the seat's own secret seed and nonce, this can't confirm a seat's inputs weren't swapped; each agent's own client checks that during play.",
-      ...(p.receipt_format === "judge-multi-v1" && !args.pieces ? { not_checked: ["pieces (pass the pieces you hold, by seat, to confirm the receipt is about them)"] } : {}),
+      ...(() => {
+        // Multi-part judge receipts: name every side whose pieces weren't passed, so a partial check is never read as a full one.
+        if (p.receipt_format !== "judge-multi-v1") return {};
+        const held = args.pieces && typeof args.pieces === "object" ? Object.keys(args.pieces) : [];
+        const missing = Object.keys(p.proof?.pieces ?? {}).filter((s) => !held.includes(s));
+        return missing.length ? { not_checked: [`pieces of ${missing.join(", ")} (pass the pieces you hold, by seat, to confirm the receipt is about them)`] } : {};
+      })(),
     };
   }
 
