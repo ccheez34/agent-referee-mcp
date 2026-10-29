@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.3.0 (unreleased)
+## 0.3.0 (2026-10-28)
 
 - **Multi-part reviews.** `sealed_review` takes `tier: "review-3x2"` or `"review-3x3"` with `pieces` (2 or 3
   `{name?, text}`) instead of `output`: three reviewers from three companies each read every piece. $0.60 and $0.70,
