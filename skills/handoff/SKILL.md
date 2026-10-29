@@ -75,7 +75,8 @@ Pick the tier:
 - **2 or 3 pieces: `review-3x2` or `review-3x3` (multi-part), the default for a long handoff.** One review in which every reviewer reads every piece, so contradictions between pieces get caught. They opened on Oct 28, 2026, at $0.60 for 2 pieces and $0.70 for 3; take the current price from `GET /reviewers`. They're paid only: the free daily reviews don't cover them, so the user needs a wallet set up. Use them when both of these hold:
   - the user's tool accepts `pieces`: the MCP `sealed_review` from `agent-referee-mcp` 0.3.0, or `agent-referee-client` 0.9.0 (JS) or 0.2.0 (Python). Older versions refuse multi-part receipts, so update first if needed.
   - the user has agreed the price
-- **Otherwise (an older tool, or more than 3 pieces): one `review-3` per piece.** Each piece is reviewed alone, so read across the results yourself for contradictions between pieces. The cost is the number of pieces times the review-3 price.
+- **More than 3 pieces:** groups of up to 3, one multi-part review per group (section 2).
+- **Otherwise (an older tool, or no wallet): one `review-3` per piece.** Each piece is reviewed alone, so read across the results yourself for contradictions between pieces. The cost is the number of pieces times the review-3 price.
 
 How many runs:
 - **One run** (one review per group of pieces) for an ordinary handoff.
