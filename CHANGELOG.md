@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.4.0 (unreleased)
+## 0.4.0 (2026-10-29)
 
 - **`verify_receipt` checks multi-part judge receipts (`judge-multi-v1`, tiers `judge-3x2` and `judge-3x3`).** Pass
   the pieces you hold by seat (`pieces: {"seller": ["text 1", "text 2"]}`) and the acks; without the pieces it says
