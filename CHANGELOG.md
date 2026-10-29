@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.0 (unreleased)
+
+- **Multi-part reviews.** `sealed_review` takes `tier: "review-3x2"` or `"review-3x3"` with `pieces` (2 or 3
+  `{name?, text}`) instead of `output`: three reviewers from three companies each read every piece. $0.60 and $0.70,
+  paid only (needs the owner's wallet), capped per request at exactly that price and counted against the daily cap.
+  A wrong number of pieces, an `output`, an oversized piece or `free: true` is refused before any payment is set up.
+- **`verify_receipt` checks `review-multi-v1` receipts**: pass the task and `pieces`. Without the pieces it says
+  they weren't checked. Needs `agent-referee-client` 0.9.0, which runs the server's 17 signed test vectors.
+- `judge-multi-v1` receipts are still refused with an "update" message until the judge tiers are added.
+
 ## 0.2.1 (2026-10-28)
 
 - **Unknown receipt formats are refused.** Needs `agent-referee-client` 0.8.1 or later. `verify_receipt` now refuses any receipt carrying a `receipt_format` this version can't check (such as the coming multi-part review and judge formats), even when it's validly signed, and says to update. Today's receipts check exactly as before. The hosted server (`remote/`) uses 0.8.1 too, from its next deploy.

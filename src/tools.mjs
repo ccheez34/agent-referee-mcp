@@ -5,7 +5,10 @@ import { validate } from "./validate.mjs";
 import { usd } from "./store.mjs";
 
 /** What each paid call costs, in micro-USDC. Also the most a single request may pay, so a price change can never overcharge. */
-export const PRICES = { review: 50_000, "review-3": 200_000 };
+export const PRICES = { review: 50_000, "review-3": 200_000, "review-3x2": 600_000, "review-3x3": 700_000 };
+/** Multi-part tiers: how many pieces each takes. Paid only; three reviewers from three companies read every piece. */
+export const MULTI_PIECES = { "review-3x2": 2, "review-3x3": 3 };
+const reviewersLabel = (tier) => (tier === "review" ? "the reviewer" : "three reviewers");
 
 const LABEL = { type: "string", pattern: "^[A-Za-z0-9_-]{1,32}$", description: "a seat label: letters, digits, _ or -, up to 32 characters" };
 const RANDOM_TIERS = ["weighted", "rps", "rps-bo3"];
@@ -91,6 +94,7 @@ function summarizeVotes(votes = []) {
     if (v.model_reported) out.model_reported = v.model_reported;
     if (v.scores) out.scores = v.scores;
     if (v.total !== undefined) out.total = v.total;
+    if (v.issues_dropped) out.issues_dropped = v.issues_dropped;
     return out;
   });
 }
@@ -236,7 +240,7 @@ export function createTools({ config, makeClient, makePayingFetch, budget, recei
   // ---------- sealed_review: paid, one agent's own output checked by independent AI reviewers ----------
   const reviewSchema = {
     type: "object",
-    required: ["task", "output"],
+    required: ["task"],
     properties: {
       task: {
         type: "string",
@@ -245,8 +249,23 @@ export function createTools({ config, makeClient, makePayingFetch, budget, recei
         description:
           "What the work was supposed to do: the instructions or spec it was produced from, with its requirements (10-4,000 characters). Reviewers judge the output against this. It is NOT a message to the reviewers: don't write \"check this for X\" (a reviewer may then fail the output for not being a check). Write \"Write a function that does A and B and never takes longer than C\", and put any claims to verify in as requirements.",
       },
-      output: { type: "string", minLength: 1, maxLength: 12000, description: "The exact work to review (up to 12,000 characters). The receipt is tied to this exact text." },
-      tier: { type: "string", enum: ["review", "review-3"], description: "review: one reviewer (by default Claude Sonnet), $0.05. review-3: three reviewers from three AI companies (by default Claude Opus, GPT-6 Luna and Gemini 3.7 Flash), majority verdict, $0.20. Default review. The exact models are in the receipt and at GET https://agentreferee.ai/reviewers." },
+      output: { type: "string", minLength: 1, maxLength: 12000, description: "The exact work to review (up to 12,000 characters), for review and review-3. The receipt is tied to this exact text." },
+      pieces: {
+        type: "array",
+        minItems: 2,
+        maxItems: 3,
+        items: {
+          type: "object",
+          required: ["text"],
+          properties: {
+            name: { type: "string", minLength: 1, maxLength: 80, description: "Optional label, e.g. a file name. It's part of the receipt, so keep it with the text." },
+            text: { type: "string", minLength: 1, maxLength: 12000, description: "The exact text of this piece (up to 12,000 characters)." },
+          },
+          additionalProperties: false,
+        },
+        description: "For review-3x2 (exactly 2 pieces) and review-3x3 (exactly 3), instead of output: the work in parts that belong together, e.g. code and its tests. Up to 36,000 characters in all. Every reviewer reads every piece. The receipt is tied to each piece's exact text, its name and the order.",
+      },
+      tier: { type: "string", enum: ["review", "review-3", "review-3x2", "review-3x3"], description: "review: one reviewer (by default Claude Sonnet), $0.05. review-3: three reviewers from three AI companies (by default Claude Opus, GPT-6 Luna and Gemini 3.7 Flash), majority verdict, $0.20. review-3x2 / review-3x3: the work as 2 or 3 pieces (use pieces, not output), three reviewers from three companies each read every piece, $0.60 / $0.70, paid only (needs the owner's wallet; no free allowance). Default review. The exact models are in the receipt and at GET https://agentreferee.ai/reviewers." },
       title: titleSchema,
       criteria: {
         type: "array",
@@ -264,7 +283,7 @@ export function createTools({ config, makeClient, makePayingFetch, budget, recei
       free: {
         type: "boolean",
         description:
-          "Use one of today's free reviews instead of paying (each address gets 3 single-reviewer and 1 review-3 a day, inside a daily budget shared by everyone, so they can run out). Without a wallet set up, reviews are always free. With a wallet, reviews are paid unless this is true.",
+          "Use one of today's free reviews instead of paying (each address gets 3 single-reviewer and 1 review-3 a day, inside a daily budget shared by everyone, so they can run out). Without a wallet set up, reviews are always free. With a wallet, reviews are paid unless this is true. Not available for review-3x2 and review-3x3.",
       },
     },
     additionalProperties: false,
@@ -277,7 +296,7 @@ export function createTools({ config, makeClient, makePayingFetch, budget, recei
     const body = { task: args.task, output: args.output, title: args.title, criteria: args.criteria, panel: args.panel };
     let r;
     try {
-      progress(`Sending to ${tier === "review-3" ? "three reviewers" : "the reviewer"} (free review)…`);
+      progress(`Sending to ${reviewersLabel(tier)} (free review)…`);
       r = await ref._call("POST", `/free/${tier}`, body);
     } catch (e) {
       throw new ToolError(explain(e, { free: true }));
@@ -300,12 +319,28 @@ export function createTools({ config, makeClient, makePayingFetch, budget, recei
   async function sealedReview(args, { progress }) {
     checkArgs(args, reviewSchema);
     if (args.task.trim().length < 10) throw new ToolError("task must be at least 10 characters of actual text.");
-    if (!args.output.trim()) throw new ToolError("output is empty.");
-    if (args.criteria && new Set(args.criteria.map((c) => c.name.trim())).size !== args.criteria.length) throw new ToolError("criteria names must be unique.");
     const tier = args.tier ?? "review";
+    const n = MULTI_PIECES[tier];
+    if (n) {
+      // Multi-part: checked here, before any payment is set up, so a mistake costs nothing.
+      if (args.output !== undefined) throw new ToolError(`${tier} takes the work as pieces ([{name?, text}], exactly ${n}), not output. Nothing was charged.`);
+      if (!Array.isArray(args.pieces) || args.pieces.length !== n) throw new ToolError(`${tier} takes exactly ${n} pieces ([{name?, text}]). Nothing was charged.`);
+      for (const [i, pc] of args.pieces.entries()) {
+        if (!pc.text.trim()) throw new ToolError(`pieces[${i}] (piece ${i + 1}) is empty. Nothing was charged.`);
+        if (pc.name !== undefined && (!pc.name.trim() || /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(pc.name))) throw new ToolError(`pieces[${i}] (piece ${i + 1}): a name must be printable text with no line breaks. Nothing was charged.`);
+      }
+      const total = args.pieces.reduce((t, pc) => t + pc.text.length, 0);
+      if (total > 36000) throw new ToolError(`The pieces add up to ${total} characters; the most in all is 36,000. Nothing was charged.`);
+      if (args.free === true) throw new ToolError(`${tier} is paid only: there's no free allowance for multi-part reviews. Use review or review-3 for a free review. Nothing was charged.`);
+      if (!config.privateKey) throw new ToolError(`${tier} is paid only (${usd(PRICES[tier])}), and no wallet is set up for this server. The owner can add one (AGENT_REFEREE_PRIVATE_KEY, see the README). For a free check, use review or review-3 with output. Nothing was charged.`);
+    } else {
+      if (args.pieces !== undefined) throw new ToolError(`pieces are for review-3x2 and review-3x3; ${tier} takes one output. Nothing was charged.`);
+      if (typeof args.output !== "string" || !args.output.trim()) throw new ToolError("output is empty.");
+    }
+    if (args.criteria && new Set(args.criteria.map((c) => c.name.trim())).size !== args.criteria.length) throw new ToolError("criteria names must be unique.");
     const price = PRICES[tier];
 
-    if (args.free === true || !config.privateKey) return reviewResult(args, tier, await freeReview(args, tier, progress), null, []);
+    if (!n && (args.free === true || !config.privateKey)) return reviewResult(args, tier, await freeReview(args, tier, progress), null, []);
     if (!/^0x[0-9a-fA-F]{64}$/.test(config.privateKey))
       throw new ToolError("AGENT_REFEREE_PRIVATE_KEY is set but isn't a 0x-prefixed 64-character hex key. The owner needs to fix it in the MCP server settings. Nothing was charged.");
 
@@ -338,8 +373,8 @@ export function createTools({ config, makeClient, makePayingFetch, budget, recei
     const ref = makeClient({ url: config.url, fetch: payer.fetch, publicKeys: pinned });
     let r;
     try {
-      progress(`Sending to ${tier === "review-3" ? "three reviewers" : "the reviewer"} (${usd(price)}, charged only if the review completes)…`);
-      r = await ref.review({ tier, task: args.task, output: args.output, title: args.title, criteria: args.criteria, panel: args.panel });
+      progress(`Sending to ${reviewersLabel(tier)} (${usd(price)}, charged only if the review completes)…`);
+      r = await ref.review(n ? { tier, task: args.task, pieces: args.pieces, title: args.title, criteria: args.criteria, panel: args.panel } : { tier, task: args.task, output: args.output, title: args.title, criteria: args.criteria, panel: args.panel });
     } catch (e) {
       // A definite answer from the service (any HTTP error) means the payment never settled: release it.
       // Anything else (the connection dropped mid-request) is ambiguous, so keep it counted: the cap errs on the safe side.
@@ -389,7 +424,7 @@ export function createTools({ config, makeClient, makePayingFetch, budget, recei
 
     const ok = r.check?.ok === true;
     return {
-      summary: `${ok ? "" : "WARNING: the receipt check FAILED (see check.problems); don't rely on this review. "}Verdict: ${r.result.verdict}${tier === "review-3" ? ` (${Object.entries(r.result.tally ?? {}).filter(([, n]) => n).map(([v, n]) => `${n} ${v}`).join(", ")})` : ""}.${paid ? "" : ` Free review${Number.isFinite(r.free?.left_today) ? ` (${r.free.left_today} of this kind left today)` : ""}.`}`,
+      summary: `${ok ? "" : "WARNING: the receipt check FAILED (see check.problems); don't rely on this review. "}Verdict: ${r.result.verdict}${tier !== "review" ? ` (${Object.entries(r.result.tally ?? {}).filter(([, n]) => n).map(([v, n]) => `${n} ${v}`).join(", ")})` : ""}.${paid ? "" : ` Free review${Number.isFinite(r.free?.left_today) ? ` (${r.free.left_today} of this kind left today)` : ""}.`}`,
       verdict: r.result.verdict,
       unanimous: r.result.unanimous,
       tally: r.result.tally,
@@ -403,8 +438,9 @@ export function createTools({ config, makeClient, makePayingFetch, budget, recei
       ...(warnings.length ? { warnings } : {}),
       ...(paid ? { paid } : { free: { ...(r.free ?? {}), note: "A free review: nothing was charged, and the receipt says funding: free." } }),
       spent_today: today ? `${usd(today.spent_micro)} of ${usd(today.limit_micro)} (UTC day)` : undefined,
-      how_to_share:
-        "Give the receipt to whoever receives the work, together with the exact task and output. They can check it for free with the verify_receipt tool or the client's verifyReview(receipt, { task, output }). The receipt holds SHA-256 fingerprints of the task and output, not the text.",
+      how_to_share: MULTI_PIECES[tier]
+        ? "Give the receipt to whoever receives the work, together with the exact task and every piece, with its name, in the same order. They can check it for free with the verify_receipt tool (task and pieces) or the client's verifyReview(receipt, { task, pieces }). The receipt holds SHA-256 fingerprints of the task and each piece, not the text."
+        : "Give the receipt to whoever receives the work, together with the exact task and output. They can check it for free with the verify_receipt tool or the client's verifyReview(receipt, { task, output }). The receipt holds SHA-256 fingerprints of the task and output, not the text.",
       what_it_proves:
         "These models gave these verdicts about this exact task and output. It is not a guarantee the output is correct: reviewers see only the text, can miss things, and a re-run can differ. A receiver should also check the task is the one it actually asked for.",
       ...(r.result.verdict === "split" ? { split: "No majority: the reviewers disagreed. Treat it like cannot_assess and read each vote's issues. Re-running is a fresh sample, not a fix." } : {}),
@@ -422,6 +458,11 @@ export function createTools({ config, makeClient, makePayingFetch, budget, recei
       },
       task: { type: "string", description: "Sealed review: the exact task you expect the review to be about. Strongly recommended." },
       output: { type: "string", description: "Sealed review: the exact output you received. Without it, the check can't confirm the review is about the work you have." },
+      pieces: {
+        type: "array",
+        items: { type: "object", required: ["text"], properties: { name: { type: "string" }, text: { type: "string" } }, additionalProperties: false },
+        description: "Multi-part review (review-3x2, review-3x3), instead of output: every piece you received, [{name?, text}], with the names and in the order given. Without them, the check can't confirm the review is about the work you have.",
+      },
       acks: { type: "array", items: { type: "object" }, description: "Match: the signed step acknowledgments that came with the receipt (optional). Any contradiction between them and the receipt is reported." },
     },
     additionalProperties: false,
@@ -447,11 +488,13 @@ export function createTools({ config, makeClient, makePayingFetch, budget, recei
       : "The signature does NOT check out against Agent Referee's pinned key: this receipt may be forged or altered. Don't rely on it.";
 
     if (p.type === "review") {
-      const res = await verifyReviewOutcome(receipt, { task: args.task, output: args.output });
+      const res = await verifyReviewOutcome(receipt, { task: args.task, output: args.output, pieces: args.pieces });
       const problems = [...(signed ? [] : ["The receipt's signature doesn't check out against the service's key."]), ...res.problems];
       const notChecked = [];
       if (args.task === undefined) notChecked.push("task (pass task to confirm the review was about the task you set)");
-      if (args.output === undefined) notChecked.push("output (pass output to confirm the review is about the exact work you received)");
+      if (MULTI_PIECES[p.tier]) {
+        if (args.pieces === undefined) notChecked.push("pieces (pass every piece, with its name and in order, to confirm the review is about the exact work you received)");
+      } else if (args.output === undefined) notChecked.push("output (pass output to confirm the review is about the exact work you received)");
       const ok = problems.length === 0;
       return {
         summary: `${ok ? "Valid" : "NOT valid"} sealed review (${p.tier}): verdict ${p.result?.verdict}.${notChecked.length ? ` Not checked: ${notChecked.map((x) => x.split(" ")[0]).join(" and ")}.` : ""}`,
@@ -547,7 +590,7 @@ export function createTools({ config, makeClient, makePayingFetch, budget, recei
       name: "sealed_review",
       title: "Sealed review of your own output (free daily allowance, then paid)",
       description:
-        "FREE OR PAID. Free: each address gets 3 single-reviewer reviews and 1 review-3 a day, inside a daily budget shared by everyone (used whenever no wallet is set up, or with free: true). Paid: $0.05, or $0.20 for review-3, in USDC on Base from the wallet the owner configured; charged only if the review completes, and capped per day by the owner. Independent AI reviewers check one agent's output against the task it was given and return a verdict (pass, needs_changes, fail, cannot_assess; review-3 can also be split), the problems found, and a signed receipt the agent can hand to whoever receives the work. Use it when someone else needs to trust the check, not for routine self-checks. The task and output are sent to the AI companies running the reviewers: leave out secrets and personal data. Can take up to a few minutes. The receipt is saved to disk automatically.",
+        "FREE OR PAID. Free: each address gets 3 single-reviewer reviews and 1 review-3 a day, inside a daily budget shared by everyone (used whenever no wallet is set up, or with free: true). Paid: $0.05, or $0.20 for review-3, in USDC on Base from the wallet the owner configured; charged only if the review completes, and capped per day by the owner. Multi-part (paid only, $0.60 for review-3x2, $0.70 for review-3x3): send the work as 2 or 3 pieces instead of one output, and three reviewers from three companies each read every piece. Independent AI reviewers check one agent's output against the task it was given and return a verdict (pass, needs_changes, fail, cannot_assess; review-3 can also be split), the problems found, and a signed receipt the agent can hand to whoever receives the work. Use it when someone else needs to trust the check, not for routine self-checks. The task and output are sent to the AI companies running the reviewers: leave out secrets and personal data. Can take up to a few minutes. The receipt is saved to disk automatically.",
       inputSchema: reviewSchema,
       annotations: { title: "Sealed review", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
       handler: sealedReview,

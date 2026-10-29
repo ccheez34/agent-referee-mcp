@@ -1,4 +1,4 @@
-// verify_receipt refuses receipts in a format the installed client doesn't know (the coming multi-part tiers),
+// verify_receipt refuses receipts in a format the installed client doesn't know (judge-multi-v1 for now),
 // even when they're validly signed, and still passes today's receipts. Uses a throwaway signing key.
 // Fixtures are copied from agent-referee-client's test/fixtures/receipts.json.
 import { test } from "node:test";
@@ -33,15 +33,21 @@ test("control: today's receipts, signed by the pinned key, pass", async () => {
   assert.equal(j.ok, true, JSON.stringify(j.problems));
 });
 
-test("a validly signed review receipt with a receipt_format is refused with the update message", async () => {
-  const { output_sha256, ...rest } = fx.review_3;
-  for (const payload of [{ ...fx.review_3, receipt_format: "review-multi-v1" }, { ...rest, tier: "review-3x2", receipt_format: "review-multi-v1" }]) {
-    const r = await verify({ receipt: await sign(payload), task: fx.review_3_task, output: fx.review_3_output });
+test("a validly signed review receipt with an unknown or misplaced receipt_format is refused", async () => {
+  // Unknown formats get the update message. review-multi-v1 is known since 0.3.0 (client 0.9.0), but only on a
+  // multi-part tier, and a single-piece receipt relabelled as one still fails (test/multi.test.mjs has the real ones).
+  for (const fmt of ["judge-multi-v1", "review-multi-v9"]) {
+    const r = await verify({ receipt: await sign({ ...fx.review_3, receipt_format: fmt }), task: fx.review_3_task, output: fx.review_3_output });
     assert.equal(r.signature_valid, true);
     assert.equal(r.ok, false);
-    assert.deepEqual(r.problems, [formatMsg("review-multi-v1")]);
+    assert.deepEqual(r.problems, [formatMsg(fmt)]);
     assert.match(r.summary, /^NOT valid/);
   }
+  const old = await verify({ receipt: await sign({ ...fx.review_3, receipt_format: "review-multi-v1" }), task: fx.review_3_task, output: fx.review_3_output });
+  assert.deepEqual(old.problems, ["A review-multi-v1 receipt must be for a multi-part tier (review-3x2 or review-3x3), not review-3."]);
+  const { output_sha256, ...rest } = fx.review_3;
+  const relabelled = await verify({ receipt: await sign({ ...rest, tier: "review-3x2", receipt_format: "review-multi-v1" }), task: fx.review_3_task });
+  assert.equal(relabelled.ok, false);
 });
 
 test("a validly signed judge receipt with a receipt_format is refused, even as judge-3", async () => {

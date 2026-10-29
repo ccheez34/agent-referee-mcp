@@ -10,8 +10,8 @@ Works with Claude Desktop, Claude Code, Cursor, and any other client that runs M
 |---|---|---|
 | `demo_match` | Runs a complete tie-break in one call, playing both seats, so you can see how it works. | Free |
 | `tiebreak` | Settles a deadlock with another agent. Both agents call it with the same `key` and settings; neither side nor the service can steer the result. | Free demo for now (paid tiers next) |
-| `sealed_review` | Independent AI reviewers check your agent's output against its task, and return a verdict plus a signed receipt you can hand to whoever receives the work. | Free: 3 reviews and 1 `review-3` a day per address (no wallet). Then $0.05, or $0.20 for `review-3` (three reviewers from three AI companies) |
-| `verify_receipt` | Checks any Agent Referee receipt offline against the pinned signing key. Pass the task and output to confirm a review is about exactly that work. | Free |
+| `sealed_review` | Independent AI reviewers check your agent's output against its task, and return a verdict plus a signed receipt you can hand to whoever receives the work. | Free: 3 reviews and 1 `review-3` a day per address (no wallet). Then $0.05, or $0.20 for `review-3` (three reviewers from three AI companies). Work in 2 or 3 pieces: $0.60 (`review-3x2`) or $0.70 (`review-3x3`), paid only |
+| `verify_receipt` | Checks any Agent Referee receipt offline against the pinned signing key. Pass the task and output (or the pieces, for a multi-part review) to confirm a review is about exactly that work. | Free |
 | `saved_receipts` | Lists the review receipts this server saved on your machine, and today's spend. | Free |
 
 ## Set it up
@@ -101,6 +101,15 @@ With no wallet set up, `sealed_review` uses the free daily allowance: **3 single
 - **The key only comes from the server's settings.** No tool takes a key as an argument, and the key is never printed or echoed in errors.
 - **Busy means free:** when the service's AI reviewers are at capacity it answers "busy" before taking payment. `sealed_review` tells the agent how long to wait, and nothing is charged or counted against the cap.
 - **Receipts are saved automatically** to `~/.agent-referee/receipts/`. The service keeps no copy of a review, so this file may be the only record. The receipt is saved even if your client stops waiting before the review finishes; find it with `saved_receipts`.
+
+## Multi-part review (`review-3x2`, `review-3x3`)
+
+For work in parts that belong together (code and its tests, a spec and its implementation), `sealed_review` takes `pieces` instead of `output`: 2 pieces with `tier: "review-3x2"` ($0.60) or 3 with `"review-3x3"` ($0.70), each `{name?, text}` of up to 12,000 characters (36,000 in all). Three reviewers from three companies each read every piece in one call.
+
+- **Paid only:** these tiers need the wallet above; there's no free allowance. Without a wallet, the tool says so and charges nothing.
+- A wrong number of pieces, an `output`, or a piece that's too long is refused before any payment is set up.
+- The receipt (`receipt_format: "review-multi-v1"`) has a fingerprint of each piece and its name. To check it with `verify_receipt`, pass the task and every piece, with the names, in the same order.
+- If a reviewer fails, nothing is charged.
 
 Your agent's tool-approval prompts still apply: most clients ask before running a tool. The `sealed_review` description starts with **FREE OR PAID** and explains both, so the cost is visible at that moment.
 
