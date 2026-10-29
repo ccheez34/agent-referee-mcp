@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- **Team mode, for the operator's own sessions.** With `AGENT_REFEREE_TEAM_MEMBER` set (and
+  `AGENT_REFEREE_TEAM_TOKEN`, unless the network adds it), `sealed_review` sends every tier, multi-part included,
+  to the service's team allowance (`/team/<tier>`) instead of paying from the wallet, and a `team_allowance` tool
+  shows what's left. No wallet or local spending cap is involved. The receipt must say `"funding": "team"` with no
+  payer, or the check fails. `free: true` still uses a free review. If the allowance runs out, the wallet isn't used
+  as a fallback. The token is sent only on `/team/*` requests to the configured service, and it's never printed.
+
 ## 0.4.0 (2026-10-29)
 
 - **`verify_receipt` checks multi-part judge receipts (`judge-multi-v1`, tiers `judge-3x2` and `judge-3x3`).** Pass

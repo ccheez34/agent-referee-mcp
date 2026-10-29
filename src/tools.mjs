@@ -21,6 +21,31 @@ function multiPanelProblem(panel) {
 }
 const reviewersLabel = (tier) => (tier === "review" ? "the reviewer" : "three reviewers");
 
+/** A fetch that adds the team allowance's headers, only on /team/* requests to the configured service. The token is
+ * never logged, returned or sent anywhere else. Without a token here, the network is expected to add x-team-token. */
+export function makeTeamFetch(team, baseFetch = globalThis.fetch.bind(globalThis)) {
+  return (input, init = {}) => {
+    const url = new URL(typeof input === "string" ? input : input.url);
+    if (!url.pathname.startsWith("/team/")) return baseFetch(input, init);
+    const headers = { ...(init.headers ?? {}), "x-team-member": team.member, ...(team.token ? { "x-team-token": team.token } : {}) };
+    return baseFetch(input, { ...init, headers });
+  };
+}
+
+/** Team allowance errors, in words an agent can act on. */
+function explainTeam(e) {
+  if (e instanceof RefereeError) {
+    const msg = String(e.message || `HTTP ${e.status}`).slice(0, 400);
+    const bare = msg.replace(/\.\)?$/, (m) => (m === ".)" ? ")" : ""));
+    if (e.status === 401) return `The team allowance refused the token (${bare}). AGENT_REFEREE_TEAM_TOKEN is wrong or missing, or the network didn't add it. Nothing was used.`;
+    if (e.status === 403) return `The team allowance doesn't know this member (${bare}). Check AGENT_REFEREE_TEAM_MEMBER against the team's member list. Nothing was used.`;
+    if (e.status === 404) return "The team allowance isn't switched on at this service (404). Nothing was used.";
+    if (e.status === 429) return `${msg}${/nothing was used/i.test(msg) ? "" : " Nothing was used."} Check what's left with the team_allowance tool. The wallet isn't used as a fallback.`;
+    return explain(e, {}) + (/nothing was (used|charged)/i.test(msg) ? "" : " A failed team review isn't counted against the allowance.");
+  }
+  return explain(e, {});
+}
+
 const LABEL = { type: "string", pattern: "^[A-Za-z0-9_-]{1,32}$", description: "a seat label: letters, digits, _ or -, up to 32 characters" };
 const RANDOM_TIERS = ["weighted", "rps", "rps-bo3"];
 const MOVES = ["rock", "paper", "scissors"];
@@ -131,8 +156,10 @@ function matchSummary(st, mySeat) {
  * @param {import("./store.mjs").Budget} deps.budget
  * @param {import("./store.mjs").ReceiptStore} deps.receipts
  */
-export function createTools({ config, makeClient, makePayingFetch, budget, receipts }) {
+export function createTools({ config, makeClient, makePayingFetch, budget, receipts, baseFetch }) {
   const pinned = config.publicKeys;
+  const team = config.team ?? null;
+  const teamClient = () => makeClient({ url: config.url, fetch: makeTeamFetch(team, baseFetch), publicKeys: pinned });
   const demoClient = (extra = {}) => makeClient({ url: config.url, demo: true, publicKeys: pinned, pollMs: 1000, ...extra });
 
   // ---------- demo_match: free, plays both seats in one call ----------
@@ -327,6 +354,38 @@ export function createTools({ config, makeClient, makePayingFetch, budget, recei
     return { ...r, check };
   }
 
+  /** A team-allowance review: the operator pays, within the member's, team's and group's budgets on the service.
+   * No wallet and no local spending cap; the service reserves the price before any AI call and gives it back if the
+   * review fails. */
+  async function teamReview(args, tier, n, progress) {
+    const ref = teamClient();
+    if (typeof ref._call !== "function") throw new ToolError("This version of agent-referee-client can't reach the team allowance. Update agent-referee-mcp. Nothing was used.");
+    const body = n
+      ? { task: args.task, pieces: args.pieces, title: args.title, criteria: args.criteria, panel: args.panel }
+      : { task: args.task, output: args.output, title: args.title, criteria: args.criteria, panel: args.panel };
+    let r;
+    try {
+      progress(`Sending to ${reviewersLabel(tier)} (team allowance, member ${team.member})…`);
+      r = await ref._call("POST", `/team/${tier}`, body);
+    } catch (e) {
+      throw new ToolError(explainTeam(e));
+    }
+    if (!r?.result || !r?.receipt) throw new ToolError("The service answered, but its review couldn't be read, so there's no receipt to show. It may have been counted against the team allowance: check with team_allowance.");
+    let check;
+    try {
+      check = await ref.verifyReview(r.receipt, n ? { task: args.task, pieces: args.pieces, tier, panel: args.panel } : { task: args.task, output: args.output, tier, panel: args.panel });
+    } catch (e) {
+      check = { ok: false, problems: [`The receipt couldn't be checked (${String(e?.message ?? e).slice(0, 200)}).`], trusts: [] };
+    }
+    check.problems = Array.isArray(check.problems) ? check.problems : [];
+    const p = r.receipt?.payload;
+    if (p?.funding !== "team" || (p?.payer ?? null) !== null) {
+      check.problems.push('A team-allowance receipt should say "funding": "team" and name no payer.');
+      check.ok = false;
+    }
+    return { ...r, check };
+  }
+
   async function sealedReview(args, { progress }) {
     checkArgs(args, reviewSchema);
     if (args.task.trim().length < 10) throw new ToolError("task must be at least 10 characters of actual text.");
@@ -343,7 +402,7 @@ export function createTools({ config, makeClient, makePayingFetch, budget, recei
       const total = args.pieces.reduce((t, pc) => t + pc.text.length, 0);
       if (total > 36000) throw new ToolError(`The pieces add up to ${total} characters; the most in all is 36,000. Nothing was charged.`);
       if (args.free === true) throw new ToolError(`${tier} is paid only: there's no free allowance for multi-part reviews. Use review or review-3 for a free review. Nothing was charged.`);
-      if (!config.privateKey) throw new ToolError(`${tier} is paid only (${usd(PRICES[tier])}), and no wallet is set up for this server. The owner can add one (AGENT_REFEREE_PRIVATE_KEY, see the README). For a free check, use review or review-3 with output. Nothing was charged.`);
+      if (!config.privateKey && !team) throw new ToolError(`${tier} is paid only (${usd(PRICES[tier])}), and no wallet is set up for this server. The owner can add one (AGENT_REFEREE_PRIVATE_KEY, see the README). For a free check, use review or review-3 with output. Nothing was charged.`);
       const pe = multiPanelProblem(args.panel);
       if (pe) throw new ToolError(`${pe} Nothing was charged.`);
     } else {
@@ -354,7 +413,9 @@ export function createTools({ config, makeClient, makePayingFetch, budget, recei
     if (args.criteria?.some((c) => !c.name.trim() || /[\n\r]/.test(c.name))) throw new ToolError("Each criteria name must be text on one line. Nothing was charged.");
     const price = PRICES[tier];
 
-    if (!n && (args.free === true || !config.privateKey)) return reviewResult(args, tier, await freeReview(args, tier, progress), null, []);
+    if (!n && args.free === true) return reviewResult(args, tier, await freeReview(args, tier, progress), null, []);
+    if (team) return reviewResult(args, tier, await teamReview(args, tier, n, progress), null, [], true);
+    if (!n && !config.privateKey) return reviewResult(args, tier, await freeReview(args, tier, progress), null, []);
     if (!/^0x[0-9a-fA-F]{64}$/.test(config.privateKey))
       throw new ToolError("AGENT_REFEREE_PRIVATE_KEY is set but isn't a 0x-prefixed 64-character hex key. The owner needs to fix it in the MCP server settings. Nothing was charged.");
 
@@ -414,7 +475,7 @@ export function createTools({ config, makeClient, makePayingFetch, budget, recei
   const paidRecord = (price, payer, settlement) => ({ amount: usd(price), wallet: payer.wallet ?? null, transaction: settlement?.transaction ?? null, network: settlement?.network ?? null });
 
   /** Save the receipt and describe the review for the agent. paid is null for a free review. */
-  async function reviewResult(args, tier, r, paid, warnings) {
+  async function reviewResult(args, tier, r, paid, warnings, viaTeam = false) {
     const record = {
       summary: `${tier} ${r.result.verdict}${args.title ? ` — ${args.title}` : ""}`,
       review_id: r.review_id,
@@ -424,7 +485,7 @@ export function createTools({ config, makeClient, makePayingFetch, budget, recei
       votes: r.votes,
       receipt: r.receipt,
       check: r.check,
-      ...(paid ? { paid } : { free: r.free ?? true }),
+      ...(viaTeam ? { team: r.team ?? null } : paid ? { paid } : { free: r.free ?? true }),
     };
     let receiptFile = null;
     let saveProblem = null;
@@ -438,7 +499,7 @@ export function createTools({ config, makeClient, makePayingFetch, budget, recei
 
     const ok = r.check?.ok === true;
     return {
-      summary: `${ok ? "" : "WARNING: the receipt check FAILED (see check.problems); don't rely on this review. "}Verdict: ${r.result.verdict}${tier !== "review" ? ` (${Object.entries(r.result.tally ?? {}).filter(([, n]) => n).map(([v, n]) => `${n} ${v}`).join(", ")})` : ""}.${paid ? "" : ` Free review${Number.isFinite(r.free?.left_today) ? ` (${r.free.left_today} of this kind left today)` : ""}.`}`,
+      summary: `${ok ? "" : "WARNING: the receipt check FAILED (see check.problems); don't rely on this review. "}Verdict: ${r.result.verdict}${tier !== "review" ? ` (${Object.entries(r.result.tally ?? {}).filter(([, n]) => n).map(([v, n]) => `${n} ${v}`).join(", ")})` : ""}.${viaTeam ? ` Team allowance (member ${team.member})${r.team?.usable_now ? `: ${r.team.usable_now} usable now` : ""}.` : paid ? "" : ` Free review${Number.isFinite(r.free?.left_today) ? ` (${r.free.left_today} of this kind left today)` : ""}.`}`,
       verdict: r.result.verdict,
       unanimous: r.result.unanimous,
       tally: r.result.tally,
@@ -450,7 +511,9 @@ export function createTools({ config, makeClient, makePayingFetch, budget, recei
       receipt_file: receiptFile,
       ...(saveProblem ? { save_problem: saveProblem } : {}),
       ...(warnings.length ? { warnings } : {}),
-      ...(paid ? { paid } : { free: { ...(r.free ?? {}), note: "A free review: nothing was charged, and the receipt says funding: free." } }),
+      ...(viaTeam
+        ? { team: { ...(r.team ?? {}), note: 'Paid from the team allowance: no wallet was charged, and the receipt says funding: team with no payer.' } }
+        : paid ? { paid } : { free: { ...(r.free ?? {}), note: "A free review: nothing was charged, and the receipt says funding: free." } }),
       spent_today: today ? `${usd(today.spent_micro)} of ${usd(today.limit_micro)} (UTC day)` : undefined,
       how_to_share: MULTI_PIECES[tier]
         ? "Give the receipt to whoever receives the work, together with the exact task and every piece, with its name, in the same order. They can check it for free with the verify_receipt tool (task and pieces) or the client's verifyReview(receipt, { task, pieces }). The receipt holds SHA-256 fingerprints of the task and each piece, not the text."
@@ -458,6 +521,23 @@ export function createTools({ config, makeClient, makePayingFetch, budget, recei
       what_it_proves:
         "These models gave these verdicts about this exact task and output. It is not a guarantee the output is correct: reviewers see only the text, can miss things, and a re-run can differ. A receiver should also check the task is the one it actually asked for.",
       ...(r.result.verdict === "split" ? { split: "No majority: the reviewers disagreed. Treat it like cannot_assess and read each vote's issues. Re-running is a fresh sample, not a fix." } : {}),
+    };
+  }
+
+  // ---------- team_allowance: free, only listed when the team allowance is set up ----------
+  async function teamAllowance(args) {
+    checkArgs(args ?? {}, { type: "object", properties: {}, additionalProperties: false });
+    let r;
+    try {
+      r = await teamClient()._call("GET", "/team/allowance");
+    } catch (e) {
+      throw new ToolError(explainTeam(e));
+    }
+    const t = r?.team ?? {};
+    return {
+      summary: `Team allowance for member ${team.member}: ${t.usable_now ?? "unknown"} usable now (member ${t.member_left_today ?? "?"} of ${t.member_daily ?? "?"} left today; team ${t.team_left_today ?? "?"} of ${t.team_daily ?? "?"}${t.group ? `; group ${t.group}: ${t.group_left} of ${t.group_total}, which doesn't reset` : ""}). Resets ${t.resets ?? "at 00:00 UTC"}.`,
+      team: t,
+      prices: r?.prices ?? null,
     };
   }
 
@@ -615,7 +695,7 @@ export function createTools({ config, makeClient, makePayingFetch, budget, recei
       name: "sealed_review",
       title: "Sealed review of your own output (free daily allowance, then paid)",
       description:
-        "FREE OR PAID. Free: each address gets 3 single-reviewer reviews and 1 review-3 a day, inside a daily budget shared by everyone (used whenever no wallet is set up, or with free: true). Paid: $0.05, or $0.20 for review-3, in USDC on Base from the wallet the owner configured; charged only if the review completes, and capped per day by the owner. Multi-part (paid only, $0.60 for review-3x2, $0.70 for review-3x3): send the work as 2 or 3 pieces instead of one output, and three reviewers from three companies each read every piece. Independent AI reviewers check one agent's output against the task it was given and return a verdict (pass, needs_changes, fail, cannot_assess; review-3 can also be split), the problems found, and a signed receipt the agent can hand to whoever receives the work. Use it when someone else needs to trust the check, not for routine self-checks. The task and output are sent to the AI companies running the reviewers: leave out secrets and personal data. Can take up to a few minutes. The receipt is saved to disk automatically.",
+        "FREE OR PAID. Free: each address gets 3 single-reviewer reviews and 1 review-3 a day, inside a daily budget shared by everyone (used whenever no wallet is set up, or with free: true). Paid: $0.05, or $0.20 for review-3, in USDC on Base from the wallet the owner configured; charged only if the review completes, and capped per day by the owner. Multi-part (paid only, $0.60 for review-3x2, $0.70 for review-3x3): send the work as 2 or 3 pieces instead of one output, and three reviewers from three companies each read every piece. Team allowance: when the owner has set one up (AGENT_REFEREE_TEAM_MEMBER), reviews are paid from it instead of the wallet, at the same prices; check what's left with team_allowance. Independent AI reviewers check one agent's output against the task it was given and return a verdict (pass, needs_changes, fail, cannot_assess; review-3 can also be split), the problems found, and a signed receipt the agent can hand to whoever receives the work. Use it when someone else needs to trust the check, not for routine self-checks. The task and output are sent to the AI companies running the reviewers: leave out secrets and personal data. Can take up to a few minutes. The receipt is saved to disk automatically.",
       inputSchema: reviewSchema,
       annotations: { title: "Sealed review", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
       handler: sealedReview,
@@ -638,6 +718,19 @@ export function createTools({ config, makeClient, makePayingFetch, budget, recei
       annotations: { title: "List saved receipts", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       handler: savedReceipts,
     },
+    ...(team
+      ? [
+          {
+            name: "team_allowance",
+            title: "Check the team allowance",
+            description:
+              "Free: shows what's left of this server's team allowance (the member's daily budget, the team's daily budget, and the member's group pool if it has one) and the review prices. While the team allowance is set up, sealed_review is paid from it instead of the wallet (free: true still uses a free review).",
+            inputSchema: { type: "object", properties: {}, additionalProperties: false },
+            annotations: { title: "Check the team allowance", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+            handler: teamAllowance,
+          },
+        ]
+      : []),
   ];
 }
 

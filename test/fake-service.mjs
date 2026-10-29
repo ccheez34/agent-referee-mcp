@@ -21,7 +21,7 @@ const load = (f) => import(pathToFileURL(join(SERVER_DIR, "src", f)).href);
  * @param {number} [opts.joinWaitSeconds] How long a join waits for the other seat (the real service: 15).
  * @param {(model: string) => string | (() => Response)} [opts.reviewAnswer] The AI answer per model (default: pass).
  */
-export async function startFakeService({ joinWaitSeconds = 15, reviewAnswer } = {}) {
+export async function startFakeService({ joinWaitSeconds = 15, reviewAnswer, team } = {}) {
   const { MatchRoom } = await load("match.ts");
   const logic = await load("logic.ts");
   const review = await load("review.ts");
@@ -57,7 +57,17 @@ export async function startFakeService({ joinWaitSeconds = 15, reviewAnswer } = 
   };
 
   // The AI providers: answer with the queued verdict for each model. Everything else passes through.
-  const stats = { reviewCalls: 0, paidRequests: 0, settled: 0, unpaidAttempts: 0, payers: [], busy: false, freeRequests: 0, freeUsed: { review: 0, "review-3": 0 } };
+  // The team allowance stand-in (only when `team` is given): the real route's checks in the same order (token, then
+  // member, then a member budget at list price), receipts with funding "team" and no payer, and the team block.
+  const TEAM_PRICES = { review: 50_000, "review-3": 200_000 };
+  const teamSpent = new Map();
+  const usdText = (m) => `$${(Math.max(0, m) / 1e6).toFixed(2)}`;
+  const teamView = (member) => {
+    const daily = team.budgets?.[member] ?? 8_000_000;
+    const spent = teamSpent.get(member) ?? 0;
+    return { funding: "team", member, member_daily: usdText(daily), member_spent_today: usdText(spent), member_left_today: usdText(daily - spent), team_daily: "$40.00", team_spent_today: usdText([...teamSpent.values()].reduce((a, b) => a + b, 0)), team_left_today: "$40.00", usable_now: usdText(daily - spent), resets: "00:00 UTC" };
+  };
+  const stats = { teamRequests: [], reviewCalls: 0, paidRequests: 0, settled: 0, unpaidAttempts: 0, payers: [], busy: false, freeRequests: 0, freeUsed: { review: 0, "review-3": 0 } };
   const FREE_PER_DAY = { review: 3, "review-3": 1 };
   const answerFor = reviewAnswer ?? (() => JSON.stringify({ verdict: "pass", confidence: "high", issues: [], reasoning: "Checked against the task." }));
   const realFetch = globalThis.fetch;
@@ -122,6 +132,26 @@ export async function startFakeService({ joinWaitSeconds = 15, reviewAnswer } = 
         const r = await forward(body.match_id, "join", { seat: body.seat, tier: m[1], role: "party", paid: true, payments_enabled: true, wait: true, payer });
         if (r.status < 400) stats.settled++;
         return send(res, r.status, r.body);
+      }
+      if (team && path.startsWith("/team/")) {
+        stats.teamRequests.push({ path, token: req.headers["x-team-token"] ?? null, member: req.headers["x-team-member"] ?? null, payment: payment ?? null });
+        if (req.headers["x-team-token"] !== team.token) return send(res, 401, { error: "Wrong or missing team token." });
+        const member = String(req.headers["x-team-member"] ?? "");
+        if (!team.members.includes(member)) return send(res, 403, { error: "x-team-member must be one of the team's members (TEAM_MEMBERS)." });
+        if (req.method === "GET" && path === "/team/allowance") return send(res, 200, { team: teamView(member), prices: { review: "$0.05", "review-3": "$0.20" } });
+        const tier = path.slice("/team/".length);
+        if (req.method !== "POST" || !TEAM_PRICES[tier]) return send(res, 404, { error: `No route: ${req.method} ${path}` });
+        const v = review.validateReview(body, tier);
+        if (!v.ok) return send(res, 400, { error: `${v.error} Nothing was used.` });
+        const daily = team.budgets?.[member] ?? 8_000_000;
+        if ((teamSpent.get(member) ?? 0) + TEAM_PRICES[tier] > daily) return send(res, 429, { error: `This ${tier} (${usdText(TEAM_PRICES[tier])}) doesn't fit your allowance today (${teamView(member).member_left_today} left; it resets at 00:00 UTC). Nothing was used.`, team: teamView(member) });
+        const commitment = await review.reviewCommitment(tier, env, v.value.panel);
+        const fast = { sleep: (ms) => new Promise((r) => setTimeout(r, Math.min(ms, 20))) };
+        const votes = await Promise.all(commitment.models.map((mm, i) => review.runOneReviewer({ ANTHROPIC_API_KEY: env.ANTHROPIC_API_KEY, OPENROUTER_API_KEY: env.OPENROUTER_API_KEY }, mm, i + 1, v.value, 2000, fast)));
+        teamSpent.set(member, (teamSpent.get(member) ?? 0) + TEAM_PRICES[tier]);
+        const payload = await review.reviewPayload({ tier, input: v.value, commitment, votes, network: env.NETWORK, id: logic.randomToken(12), funding: team.funding ?? "team" });
+        const receipt = await signReceipt(payload, SIGNING_KEY, PUBLIC_KEY);
+        return send(res, 200, { review_id: payload.review_id, tier, result: payload.result, votes, receipt, note: "test", team: teamView(member) });
       }
       if (req.method === "GET" && path === "/health") return send(res, 200, { ok: true, status: stats.busy ? "degraded" : "ok", reasons: [] });
       if (req.method === "POST" && (path === "/review" || path === "/review-3")) {

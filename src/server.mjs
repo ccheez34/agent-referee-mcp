@@ -24,8 +24,15 @@ export function loadConfig(env = process.env) {
   if (!["true", "false", "1", "0", "yes", "no"].includes(save)) throw new Error('AGENT_REFEREE_SAVE_RECEIPTS must be "true" or "false".');
   const url = env.AGENT_REFEREE_URL?.trim() || undefined;
   if (url && !/^https:\/\/|^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?(\/|$)/.test(url)) throw new Error("AGENT_REFEREE_URL must be an https:// address.");
+  // Team allowance (the operator's own sessions): a member name, and the shared token unless the network adds it.
+  const teamMember = env.AGENT_REFEREE_TEAM_MEMBER?.trim() || undefined;
+  const teamToken = env.AGENT_REFEREE_TEAM_TOKEN?.trim() || undefined;
+  if (teamToken && !teamMember) throw new Error("AGENT_REFEREE_TEAM_TOKEN is set but AGENT_REFEREE_TEAM_MEMBER isn't: set the member name too.");
+  if (teamMember && !/^[A-Za-z0-9._-]{1,32}$/.test(teamMember)) throw new Error("AGENT_REFEREE_TEAM_MEMBER must be 1 to 32 letters, digits, dots, dashes or underscores.");
+  if (teamToken && !/^[\x21-\x7e]{32,512}$/.test(teamToken)) throw new Error("AGENT_REFEREE_TEAM_TOKEN must be 32 or more printable characters with no spaces.");
   return {
     url,
+    team: teamMember ? { member: teamMember, token: teamToken } : undefined,
     privateKey: env.AGENT_REFEREE_PRIVATE_KEY?.trim() || undefined,
     dailyLimitMicro: toMicro(limit),
     publicKeys: [REFEREE_KEY, ...extraKeys.filter((k) => k !== REFEREE_KEY)],
@@ -35,10 +42,10 @@ export function loadConfig(env = process.env) {
 }
 
 /** Everything the server needs, with the outside world injectable for tests. */
-export function buildTools(config, { makeClient = (o) => new AgentReferee(o), makePayingFetch = defaultPayingFetch, now } = {}) {
+export function buildTools(config, { makeClient = (o) => new AgentReferee(o), makePayingFetch = defaultPayingFetch, now, baseFetch } = {}) {
   const budget = new Budget({ dir: config.dataDir, dailyLimitMicro: config.dailyLimitMicro, now });
   const receipts = new ReceiptStore({ dir: config.dataDir, enabled: config.saveReceipts });
-  return createTools({ config, makeClient, makePayingFetch, budget, receipts });
+  return createTools({ config, makeClient, makePayingFetch, budget, receipts, baseFetch });
 }
 
 export const SERVER_INFO = { name: "agent-referee", title: "Agent Referee", version: VERSION };
@@ -59,7 +66,7 @@ export async function main(env = process.env) {
     process.exit(1);
   }
   process.stderr.write(
-    `[agent-referee-mcp] ${VERSION} ready. Paid reviews: ${config.privateKey ? `on, daily cap $${(config.dailyLimitMicro / 1e6).toFixed(2)}` : "off (no AGENT_REFEREE_PRIVATE_KEY); free reviews only"}. Receipts: ${config.saveReceipts ? join(config.dataDir, "receipts") : "not saved"}.\n`,
+    `[agent-referee-mcp] ${VERSION} ready. Paid reviews: ${config.privateKey ? `on, daily cap $${(config.dailyLimitMicro / 1e6).toFixed(2)}` : "off (no AGENT_REFEREE_PRIVATE_KEY); free reviews only"}. ${config.team ? `Team allowance: on, as member ${config.team.member} (${config.team.token ? "token from AGENT_REFEREE_TEAM_TOKEN" : "no token set here: the network must add x-team-token"}); sealed_review uses it instead of the wallet. ` : ""}Receipts: ${config.saveReceipts ? join(config.dataDir, "receipts") : "not saved"}.\n`,
   );
   await runStdio({ info: SERVER_INFO, instructions: INSTRUCTIONS, tools: buildTools(config) });
 }
