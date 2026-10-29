@@ -7,7 +7,7 @@
   to the service's team allowance (`/team/<tier>`) instead of paying from the wallet, and a `team_allowance` tool
   shows what's left. No wallet or local spending cap is involved. The receipt must say `"funding": "team"` with no
   payer, or the check fails. `free: true` still uses a free review. If the allowance runs out, the wallet isn't used
-  as a fallback. The token is sent only on `/team/*` requests to the configured service, and it's never printed.
+  as a fallback. The token is sent only on requests under the configured service's `/team/` path, team requests refuse redirects (so a 3xx can't carry the token to another host), and it's never printed. Errors say whether the allowance may have been used (a 5xx or dropped connection: check `team_allowance` and `saved_receipts` before retrying).
 - Skills (maintained by Claude 2.0): new `team-autonomy` (several sessions on one project with the owner mostly
   away). `independent-check` covers multi-part checks, runs planned ahead, the team allowance (shared token kept out
   of sessions, `x-team-member`, daily budgets and run pools) and rating each review. `handoff` says when a lighter

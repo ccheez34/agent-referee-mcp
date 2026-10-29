@@ -31,6 +31,8 @@ test("config: member alone is team mode (the network adds the token); a token ne
   assert.equal(loadConfig({}).team, undefined);
   assert.throws(() => loadConfig({ AGENT_REFEREE_TEAM_TOKEN: TOKEN }), /AGENT_REFEREE_TEAM_MEMBER isn't/);
   assert.throws(() => loadConfig({ AGENT_REFEREE_TEAM_MEMBER: "two words" }), /TEAM_MEMBER must be/);
+  assert.throws(() => loadConfig({ AGENT_REFEREE_TEAM_MEMBER: "m".repeat(33) }), /TEAM_MEMBER must be/);
+  assert.throws(() => loadConfig({ AGENT_REFEREE_TEAM_MEMBER: "3.0", AGENT_REFEREE_TEAM_TOKEN: "t".repeat(513) }), /32 or more printable/);
   for (const bad of ["short-token", "has a space " + "x".repeat(40)]) {
     try {
       loadConfig({ AGENT_REFEREE_TEAM_MEMBER: "3.0", AGENT_REFEREE_TEAM_TOKEN: bad });
@@ -42,18 +44,71 @@ test("config: member alone is team mode (the network adds the token); a token ne
   }
 });
 
-test("makeTeamFetch: headers only on /team/* paths; no token header when none is set", async () => {
+test("makeTeamFetch: headers only under the service's own /team/ path, no redirects, no token header when none is set", async () => {
   const seen = [];
-  const base = async (url, init) => (seen.push({ url, headers: init.headers }), new Response("{}"));
-  const f = makeTeamFetch({ member: "S1", token: TOKEN }, base);
+  const base = async (url, init) => (seen.push({ url: String(url?.href ?? url), headers: init.headers ? Object.fromEntries(new Headers(init.headers)) : undefined, redirect: init.redirect }), new Response("{}"));
+  const f = makeTeamFetch({ member: "S1", token: TOKEN }, "https://agentreferee.ai/", base);
   await f("https://agentreferee.ai/team/review", { headers: { "content-type": "application/json" } });
   await f("https://agentreferee.ai/pubkey", { headers: {} });
   await f("https://agentreferee.ai/teamwork", {});
+  await f("https://elsewhere.example/team/review", {});
+  await f(new URL("https://agentreferee.ai/team/allowance"));
   assert.deepEqual(seen[0].headers, { "content-type": "application/json", "x-team-member": "S1", "x-team-token": TOKEN });
+  assert.equal(seen[0].redirect, "error");
   assert.deepEqual(seen[1].headers, {});
   assert.equal(seen[2].headers, undefined);
-  await makeTeamFetch({ member: "S1" }, base)("https://agentreferee.ai/team/allowance", {});
-  assert.deepEqual(seen[3].headers, { "x-team-member": "S1" });
+  assert.equal(seen[3].headers, undefined, "another host never gets the token");
+  assert.equal(seen[4].headers["x-team-token"], TOKEN, "a URL object works too");
+  // A service URL with a path prefix.
+  await makeTeamFetch({ member: "S1" }, "https://host.example/api", base)("https://host.example/api/team/allowance", {});
+  assert.deepEqual(seen[5].headers, { "x-team-member": "S1" });
+});
+
+test("a redirect on a team request is refused, and the token never reaches the redirect target", async () => {
+  const { createServer: http } = await import("node:http");
+  const stolen = [];
+  const thief = http((req, res) => (stolen.push(req.headers["x-team-token"] ?? null), res.end("{}")));
+  await new Promise((r) => thief.listen(0, "127.0.0.1", r));
+  const svcR = http((req, res) => (res.writeHead(307, { location: `http://127.0.0.1:${thief.address().port}/steal` }), res.end()));
+  await new Promise((r) => svcR.listen(0, "127.0.0.1", r));
+  try {
+    const c = inProcess(createServer, { config: loadConfig({ AGENT_REFEREE_URL: `http://127.0.0.1:${svcR.address().port}`, AGENT_REFEREE_DATA_DIR: await tempDir(), AGENT_REFEREE_TEAM_MEMBER: "S1", AGENT_REFEREE_TEAM_TOKEN: TOKEN }) });
+    await c.init();
+    const r = await c.call("sealed_review", { task, output: "22.2" });
+    assert.equal(r.isError, true);
+    assert.match(r.text, /redirect, which team mode refuses/);
+    const a = await c.call("team_allowance", {});
+    assert.equal(a.isError, true);
+    assert.deepEqual(stolen, []);
+  } finally {
+    thief.close();
+    svcR.close();
+  }
+});
+
+test("team mode errors say honestly whether the allowance may have been used", async () => {
+  const { RefereeError } = await import("agent-referee-client");
+  const dir = await tempDir();
+  let fail;
+  const tools = createTools({
+    config: { publicKeys: ["x"], dailyLimitMicro: 1_000_000, team: { member: "T3", token: TOKEN } },
+    makeClient: () => ({ _call: async () => { throw fail; } }),
+    makePayingFetch: async () => assert.fail("no payment in team mode"),
+    budget: new Budget({ dir, dailyLimitMicro: 1_000_000 }),
+    receipts: new ReceiptStore({ dir }),
+  });
+  const review = (a) => tools.find((t) => t.name === "sealed_review").handler(a, { progress: () => {} });
+  const cases = [
+    [new RefereeError("Bad gateway", 502, {}), /may or may not have been counted.*team_allowance and saved_receipts/s],
+    [new TypeError("fetch failed"), /If the review finished anyway, it was counted.*team_allowance/s],
+    [new RefereeError("busy: at capacity", 503, { busy: true, retry_after_s: 9 }), /nothing was used from the team allowance\. Try again in about 9 s/],
+    [new RefereeError("The team allowance can't be checked right now. Nothing was used; try again in a minute.", 503, {}), /In rare cases.*stays counted/s],
+    [new RefereeError("criteria names must be unique. Nothing was charged.", 400, {}), /^criteria names must be unique\. Nothing was charged\.$/],
+  ];
+  for (const [e, re] of cases) {
+    fail = e;
+    await assert.rejects(review({ task, output: "22.2" }), (err) => (assert.match(err.message, re), assert.doesNotMatch(err.message, /spending cap|payment/i), true));
+  }
 });
 
 test("stdio: team mode lists team_allowance and says so at startup, never printing the token", { skip }, async () => {
@@ -114,10 +169,10 @@ test("team mode refusals: wrong token, unknown member, no budget, and the token 
     [{ AGENT_REFEREE_TEAM_TOKEN: "y".repeat(40) }, /refused the token.*Nothing was used/s],
     [{ AGENT_REFEREE_TEAM_TOKEN: "" }, /refused the token.*network didn't add it/s],
     [{ AGENT_REFEREE_TEAM_MEMBER: "4.0" }, /doesn't know this member.*AGENT_REFEREE_TEAM_MEMBER/s],
-    [{ AGENT_REFEREE_TEAM_MEMBER: "broke" }, /doesn't fit your allowance.*Nothing was used\..*isn't used as a fallback/s],
+    [{ AGENT_REFEREE_TEAM_MEMBER: "broke", AGENT_REFEREE_PRIVATE_KEY: "0x" + "11".repeat(32) }, /doesn't fit your allowance.*Nothing was used\..*isn't used as a fallback/s],
   ];
   for (const [env, re] of cases) {
-    const c = await teamServer(env);
+    const c = await teamServer(env, async () => assert.fail("the wallet is never used in team mode"));
     const r = await c.call("sealed_review", { task, output: "22.2" });
     assert.equal(r.isError, true, JSON.stringify(env));
     assert.match(r.text, re);
