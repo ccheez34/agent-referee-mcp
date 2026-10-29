@@ -7,7 +7,7 @@ import { buildTools } from "./tools.mjs";
 
 export { ReviewJob } from "./job.mjs";
 
-export const VERSION = "0.1.0";
+export const VERSION = "0.1.1";
 const MAX_BODY = 65_536; // bytes
 // Browsers may only call from these pages (DNS-rebinding protection). Server-to-server calls send no Origin.
 const DEFAULT_ORIGINS = ["https://chatgpt.com", "https://chat.openai.com"];

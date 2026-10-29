@@ -1,6 +1,6 @@
 {
   "name": "agent-referee-remote-mcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "Hosted (remote) MCP server for Agent Referee, for clients that need a URL instead of a local process, such as ChatGPT. Free sealed reviews with start-and-check-back tools.",
   "type": "module",
