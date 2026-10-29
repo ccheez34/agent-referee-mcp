@@ -1,6 +1,6 @@
 {
   "name": "agent-referee-mcp",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "mcpName": "io.github.ccheez34/agent-referee",
   "description": "MCP server for Agent Referee: free demo tie-breaks between AI agents, sealed review of an agent's own output (free daily allowance, then paid), and offline checks of signed receipts.",
   "type": "module",
@@ -13,10 +13,10 @@
   },
   "files": ["bin", "src", "README.md", "CHANGELOG.md", "LICENSE"],
   "scripts": {
-    "test": "node --test test/protocol.test.mjs test/store.test.mjs test/e2e.test.mjs"
+    "test": "node --test test/protocol.test.mjs test/store.test.mjs test/format.test.mjs test/e2e.test.mjs"
   },
   "dependencies": {
-    "agent-referee-client": "^0.8.0"
+    "agent-referee-client": "^0.8.1"
   },
   "devDependencies": {
     "x402-fetch": "^1.2.0"

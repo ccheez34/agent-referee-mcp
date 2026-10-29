@@ -10,7 +10,7 @@
     "deploy": "wrangler deploy"
   },
   "dependencies": {
-    "agent-referee-client": "^0.8.0"
+    "agent-referee-client": "^0.8.1"
   },
   "devDependencies": {
     "wrangler": "^4.0.0"

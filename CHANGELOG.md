@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.1 (2026-10-28)
+
+- **Unknown receipt formats are refused.** Needs `agent-referee-client` 0.8.1 or later. `verify_receipt` now refuses any receipt carrying a `receipt_format` this version can't check (such as the coming multi-part review and judge formats), even when it's validly signed, and says to update. Today's receipts check exactly as before. The hosted server (`remote/`) uses 0.8.1 too, from its next deploy.
+- **independent-check skill:** after checking a review's findings, the agent gives the review a satisfaction rating from 0 to 100%, colour-coded from green (100%) through yellow and orange to red (20% and below), and records it in the check folder's index.
+
 ## 0.2.0
 
 - **Free sealed reviews.** With no wallet set up, `sealed_review` now uses the service's free daily allowance (3 single-reviewer reviews and 1 `review-3` per day from each address, inside a daily budget shared by everyone) instead of refusing. With a wallet, pass `free: true` to use the allowance. Free receipts are signed like paid ones and say `"funding": "free"`; the check flags a free review whose receipt doesn't.

@@ -51,7 +51,7 @@ There are two ways reviews get paid for. If the agent's MCP server has a wallet 
 - Give each run a different panel: one model from each of three AI companies, with the combination varied between runs. The same model may appear in more than one run.
 - Opt-in models are only on a panel when named (random draws such as `rotate` never pick them). Keep the slow ones (DeepSeek, Qwen, Mistral, and GLM until it's been tried) off pieces longer than about 6,000 characters unless the user asks for them. That cutoff is a cautious rule of thumb: they often ran out of answer room or timed out on pieces of about 11,000 characters. The user isn't charged for a failed review, but it wastes time, and the AI providers still bill the service for the attempt. Use default-pool models (Claude, GPT, Gemini) or Kimi, which kept up. If the user does ask for a slow one, say it may fail.
 - When handing over the line to run, say what to send back once it finishes. The receipt comes first: it's the signed record, and it already holds each reviewer's verdict, issues and reasoning. If you can read the user's files, ask them to just say "done" and read the receipt files yourself. If you can't, ask them to paste each receipt file's full contents (the JSON, not just its path).
-- Every receipt must end up kept, without exception: posted in the chat in full, saved to files, or both. Never leave one only in the script's own data folder or only on screen. When you can write files, organize them: one folder per check (named for the work and the date), one receipt file per review named for its piece, run or panel and its verdict (for example `run-2-sonnet-gpt-flash-pass.json`), and an index file listing each run's panel, verdict, transaction and receipt file. Failed reviews have no receipt; list them in the index as failed and uncharged. Then verify each receipt with `verify_receipt` against the exact task and output you sent, and say the receipts are the only record (the service keeps no copy).
+- Every receipt must end up kept, without exception: posted in the chat in full, saved to files, or both. Never leave one only in the script's own data folder or only on screen. When you can write files, organize them: one folder per check (named for the work and the date), one receipt file per review named for its piece, run or panel and its verdict (for example `run-2-sonnet-gpt-flash-pass.json`), and an index file listing each run's panel, verdict, satisfaction rating (see "Rate the review"), transaction and receipt file. Failed reviews have no receipt; list them in the index as failed and uncharged. Then verify each receipt with `verify_receipt` against the exact task and output you sent, and say the receipts are the only record (the service keeps no copy).
 - Offer the printout as well: what the window showed for each run, as a readable summary, posted in the chat or saved next to the receipts. It's a convenience; the receipts are the record.
 - Before the user posts a receipt anywhere public, mention what's in it: hashes of the task and output rather than the text, but also the reviewers' issues and reasoning, which can quote or describe the work, and, for a paid review, the paying wallet.
 
@@ -65,6 +65,34 @@ There are two ways reviews get paid for. If the agent's MCP server has a wallet 
 - If the verdict isn't `pass`, offer to fix the problems. After fixing, a fresh review is a new paid call: ask before running it. Never add runs after an unwanted verdict just to get a different one; several runs are fine only when agreed beforehand.
 - On `split` or `cannot_assess`, explain what the reviewers disagreed on or what was missing, rather than picking a side. A split is best settled with a test or a person, not another run.
 - Check each reported problem before acting on it: reviewers raise false issues too, and a suggested fix can be wrong. Anything that changes limits, capacity or behaviour under load should be tested, not just reviewed.
+
+## Rate the review
+
+After checking each reported problem (above), give the user a satisfaction rating for the review itself: how satisfied you, the one who asked for and received it, are with what it gave you. You rate the review, not the work. A `needs_changes` that found real problems can score high; a `pass` that missed a bug your tests already showed scores low. Never raise a score because the verdict was the one you hoped for.
+
+**Score from 0 to 100%, in this order:**
+1. **Accuracy:** what share of the reported problems held up when you checked them against the code, the tests or the sources.
+2. **What it caught:** whether it found the problems that mattered most, as far as you can tell.
+3. **What it missed:** anything you know of (from tests, live runs or a later review) that it should have seen.
+4. **Clarity:** whether the problems were specific enough to act on.
+
+Findings that were wrong only because your own brief left out context (the code was in another piece, say) don't count against the review. Say they were a brief problem, and fix the brief next time.
+
+**Show it with its colour,** green at 100% fading through yellow and orange to red at 20% and below:
+
+| Score | Colour | Shown in chat |
+|---|---|---|
+| 90-100% | green | 🟩 |
+| 70-89% | light green | 🟩 |
+| 55-69% | yellow | 🟨 |
+| 35-54% | orange | 🟧 |
+| 0-34% | red | 🟥 |
+
+In chat, use a ten-cell bar in the score's colour, then the score and one line on why. For example: `🟩🟩🟩🟩🟩🟩🟩🟩⬜⬜ 82%: 9 of 11 problems were real, including the payment-header leak; it missed nothing known.`
+
+In files and pages (the check folder's index, an HTML report), colour the score exactly, with hue = 120 × (score − 20) ÷ 80, kept between 0 and 120, as `hsl(hue, 70%, 38%)`. That makes 100% green (hue 120), 60% yellow (60), 40% orange (30) and 20% or less red (0).
+
+Rate every review. For a batch, rate each run, then the batch as a whole. Put each rating in the check folder's index next to the run's verdict and receipt, so ratings can be compared across panels and over time.
 
 ## Checking a receipt someone else gave you
 
