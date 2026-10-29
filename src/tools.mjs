@@ -473,9 +473,12 @@ export function createTools({ config, makeClient, makePayingFetch, budget, recei
       task: { type: "string", description: "Sealed review: the exact task you expect the review to be about. Strongly recommended." },
       output: { type: "string", description: "Sealed review: the exact output you received. Without it, the check can't confirm the review is about the work you have." },
       pieces: {
-        type: "array",
-        items: { type: "object", required: ["text"], properties: { name: { type: "string" }, text: { type: "string" } }, additionalProperties: false },
-        description: "Multi-part review (review-3x2, review-3x3), instead of output: every piece you received, [{name?, text}], with the names and in the order given. Without them, the check can't confirm the review is about the work you have.",
+        anyOf: [
+          { type: "array", items: { type: "object", required: ["text"], properties: { name: { type: "string" }, text: { type: "string" } }, additionalProperties: false } },
+          { type: "object", additionalProperties: { type: "array", items: { type: "string" } } },
+        ],
+        description:
+          "Multi-part review (review-3x2, review-3x3), instead of output: every piece you received, [{name?, text}], with the names and in the order given. Multi-part judge match (judge-3x2, judge-3x3): the pieces you hold by seat, {\"seller\": [\"text 1\", \"text 2\"]}. Without them, the check can't confirm the receipt is about the work you have.",
       },
       acks: { type: "array", items: { type: "object" }, description: "Match: the signed step acknowledgments that came with the receipt (optional). Any contradiction between them and the receipt is reported." },
     },
@@ -526,7 +529,8 @@ export function createTools({ config, makeClient, makePayingFetch, budget, recei
       };
     }
 
-    const res = await verifyOutcome(receipt, args.acks ? { acks: args.acks } : {});
+    if (Array.isArray(args.pieces)) throw new ToolError("For a match receipt, pieces are by seat: {\"seat\": [\"text 1\", \"text 2\"]}.");
+    const res = await verifyOutcome(receipt, { ...(args.acks ? { acks: args.acks } : {}), ...(args.pieces ? { pieces: args.pieces } : {}) });
     let acksSigned = true;
     for (const a of args.acks ?? []) if (!(await verifySignature(a, pinned).catch(() => false))) acksSigned = false;
     const problems = [...(signed ? [] : ["The receipt's signature doesn't check out against the service's key."]), ...res.problems];
@@ -550,6 +554,7 @@ export function createTools({ config, makeClient, makePayingFetch, budget, recei
       signature: keyNote,
       ...(p.demo ? { demo_note: "This is a free demo receipt. It's marked demo inside the signed part and is not a paid result." } : {}),
       limits: "Without the seat's own secret seed and nonce, this can't confirm a seat's inputs weren't swapped; each agent's own client checks that during play.",
+      ...(p.receipt_format === "judge-multi-v1" && !args.pieces ? { not_checked: ["pieces (pass the pieces you hold, by seat, to confirm the receipt is about them)"] } : {}),
     };
   }
 

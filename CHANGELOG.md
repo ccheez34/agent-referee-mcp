@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.0 (unreleased)
+
+- **`verify_receipt` checks multi-part judge receipts (`judge-multi-v1`, tiers `judge-3x2` and `judge-3x3`).** Pass
+  the pieces you hold by seat (`pieces: {"seller": ["text 1", "text 2"]}`) and the acks; without the pieces it says
+  they weren't checked. Needs `agent-referee-client` 0.10.0, which runs the server's 20 signed judge test vectors.
+- Skills (maintained by Claude 2.0): `handoff` and `code-review-panel` now use the multi-part review tiers; also
+  `fair-tiebreak` and `agent-dispute`.
+
 ## 0.3.0 (2026-10-28)
 
 - **Multi-part reviews.** `sealed_review` takes `tier: "review-3x2"` or `"review-3x3"` with `pieces` (2 or 3

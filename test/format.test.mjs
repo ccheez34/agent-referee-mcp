@@ -50,11 +50,15 @@ test("a validly signed review receipt with an unknown or misplaced receipt_forma
   assert.equal(relabelled.ok, false);
 });
 
-test("a validly signed judge receipt with a receipt_format is refused, even as judge-3", async () => {
-  for (const tier of ["judge-3", "judge-3x2"]) {
-    const r = await verify({ receipt: JSON.stringify(await sign({ ...fx.judge_3, tier, receipt_format: "judge-multi-v1" })) });
-    assert.equal(r.signature_valid, true);
-    assert.equal(r.ok, false);
-    assert.ok(r.problems.includes(formatMsg("judge-multi-v1")), JSON.stringify(r.problems));
-  }
+test("a validly signed judge receipt with an unknown or misplaced receipt_format is refused", async () => {
+  // judge-multi-v1 is known since 0.4.0 (client 0.10.0), but only on judge-3x2 and judge-3x3, and a judge-3 receipt
+  // relabelled as one still fails (test/multi-judge.test.mjs has the real ones).
+  const unknown = await verify({ receipt: JSON.stringify(await sign({ ...fx.judge_3, receipt_format: "judge-multi-v9" })) });
+  assert.equal(unknown.signature_valid, true);
+  assert.deepEqual(unknown.problems, [formatMsg("judge-multi-v9")]);
+  const j3 = await verify({ receipt: await sign({ ...fx.judge_3, receipt_format: "judge-multi-v1" }) });
+  assert.deepEqual(j3.problems, ["A judge-multi-v1 receipt must be for a multi-part judge tier (judge-3x2 or judge-3x3), not judge-3."]);
+  const relabelled = await verify({ receipt: await sign({ ...fx.judge_3, tier: "judge-3x2", receipt_format: "judge-multi-v1" }) });
+  assert.equal(relabelled.signature_valid, true);
+  assert.equal(relabelled.ok, false);
 });

@@ -11,7 +11,7 @@ Works with Claude Desktop, Claude Code, Cursor, and any other client that runs M
 | `demo_match` | Runs a complete tie-break in one call, playing both seats, so you can see how it works. | Free |
 | `tiebreak` | Settles a deadlock with another agent. Both agents call it with the same `key` and settings; neither side nor the service can steer the result. | Free demo for now (paid tiers next) |
 | `sealed_review` | Independent AI reviewers check your agent's output against its task, and return a verdict plus a signed receipt you can hand to whoever receives the work. | Free: 3 reviews and 1 `review-3` a day per address (no wallet). Then $0.05, or $0.20 for `review-3` (three reviewers from three AI companies). Work in 2 or 3 pieces: $0.60 (`review-3x2`) or $0.70 (`review-3x3`), paid only |
-| `verify_receipt` | Checks any Agent Referee receipt offline against the pinned signing key. Pass the task and output (or the pieces, for a multi-part review) to confirm a review is about exactly that work. | Free |
+| `verify_receipt` | Checks any Agent Referee receipt offline against the pinned signing key. Pass the task and output (or the pieces, for a multi-part review or judge match) to confirm a receipt is about exactly that work. | Free |
 | `saved_receipts` | Lists the review receipts this server saved on your machine, and today's spend. | Free |
 
 ## Set it up

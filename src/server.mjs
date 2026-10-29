@@ -6,7 +6,7 @@ import { createMcpServer, runStdio } from "./protocol.mjs";
 import { createTools, defaultPayingFetch } from "./tools.mjs";
 import { Budget, ReceiptStore, toMicro } from "./store.mjs";
 
-export const VERSION = "0.3.0";
+export const VERSION = "0.4.0";
 
 /** Agent Referee's receipt-signing key (key ID 375ba8b346776e2f), pinned so a faked key page can't fool a check. */
 export const REFEREE_KEY = "vM2GY6ZEYc/omRlIFrzu0TaMGtjHXQtchg9d7lPKkTY=";
