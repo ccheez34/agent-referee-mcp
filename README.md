@@ -191,6 +191,8 @@ All optional, set in the server's `env`:
 | `AGENT_REFEREE_SAVE_RECEIPTS` | `true` | Set `false` to stop saving receipts. |
 | `AGENT_REFEREE_PUBLIC_KEYS` | none | Extra signing keys to trust (comma-separated), only if the service ever announces a new key. The current key is always pinned. |
 | `AGENT_REFEREE_URL` | the official service | Only for testing against your own copy of the server. |
+| `AGENT_REFEREE_TEAM_MEMBER` | none | Only for the operator's own sessions on a team allowance (not open to the public). With it, `sealed_review` is paid from that allowance instead of the wallet, and a `team_allowance` tool shows what's left. |
+| `AGENT_REFEREE_TEAM_TOKEN` | none | The team allowance's token, sent only on its `/team/*` requests and never printed. Leave it unset if your network adds it for you. Needs `AGENT_REFEREE_TEAM_MEMBER`. |
 
 ## Honest status
 
