@@ -1,5 +1,5 @@
 // The Agent Referee tools: what each one accepts, what it tells the agent, and what it does.
-import { RefereeError, Seat, verifyOutcome, verifyReviewOutcome, verifySignature } from "agent-referee-client";
+import { DEFAULT_URL, RefereeError, Seat, verifyOutcome, verifyReviewOutcome, verifySignature } from "agent-referee-client";
 import { ToolError } from "./protocol.mjs";
 import { validate } from "./validate.mjs";
 import { usd } from "./store.mjs";
@@ -21,29 +21,47 @@ function multiPanelProblem(panel) {
 }
 const reviewersLabel = (tier) => (tier === "review" ? "the reviewer" : "three reviewers");
 
-/** A fetch that adds the team allowance's headers, only on /team/* requests to the configured service. The token is
- * never logged, returned or sent anywhere else. Without a token here, the network is expected to add x-team-token. */
-export function makeTeamFetch(team, baseFetch = globalThis.fetch.bind(globalThis)) {
+/** A fetch that adds the team allowance's headers, only on requests under `${serviceUrl}/team/`. The token is never
+ * logged, returned or sent anywhere else, and team requests refuse redirects, so a 3xx can't carry it to another host
+ * (fetch only strips its own auth headers on a redirect). Without a token here, the network is expected to add it. */
+export function makeTeamFetch(team, serviceUrl, baseFetch = globalThis.fetch.bind(globalThis)) {
+  const prefix = String(serviceUrl).replace(/\/+$/, "") + "/team/";
   return (input, init = {}) => {
-    const url = new URL(typeof input === "string" ? input : input.url);
-    if (!url.pathname.startsWith("/team/")) return baseFetch(input, init);
-    const headers = { ...(init.headers ?? {}), "x-team-member": team.member, ...(team.token ? { "x-team-token": team.token } : {}) };
-    return baseFetch(input, { ...init, headers });
+    const href = typeof input === "string" ? input : input instanceof URL ? input.href : String(input?.url ?? "");
+    if (!href.startsWith(prefix)) return baseFetch(input, init);
+    const headers = new Headers(init.headers ?? (typeof input === "object" && input?.headers ? input.headers : undefined));
+    headers.set("x-team-member", team.member);
+    if (team.token) headers.set("x-team-token", team.token);
+    return baseFetch(input, { ...init, headers, redirect: "error" });
   };
 }
 
-/** Team allowance errors, in words an agent can act on. */
-function explainTeam(e) {
+/** Team allowance errors, in words an agent can act on. `review`: the call was a review (it may have run). */
+function explainTeam(e, { review = false } = {}) {
+  const check = review ? "check team_allowance and saved_receipts before retrying" : "try again in a minute";
   if (e instanceof RefereeError) {
     const msg = String(e.message || `HTTP ${e.status}`).slice(0, 400);
     const bare = msg.replace(/\.\)?$/, (m) => (m === ".)" ? ")" : ""));
+    const used = /nothing was (used|charged)/i.test(msg);
     if (e.status === 401) return `The team allowance refused the token (${bare}). AGENT_REFEREE_TEAM_TOKEN is wrong or missing, or the network didn't add it. Nothing was used.`;
     if (e.status === 403) return `The team allowance doesn't know this member (${bare}). Check AGENT_REFEREE_TEAM_MEMBER against the team's member list. Nothing was used.`;
     if (e.status === 404) return "The team allowance isn't switched on at this service (404). Nothing was used.";
-    if (e.status === 429) return `${msg}${/nothing was used/i.test(msg) ? "" : " Nothing was used."} Check what's left with the team_allowance tool. The wallet isn't used as a fallback.`;
-    return explain(e, {}) + (/nothing was (used|charged)/i.test(msg) ? "" : " A failed team review isn't counted against the allowance.");
+    if (e.status === 429) return `${msg}${used ? "" : " Nothing was used."} Check what's left with the team_allowance tool. The wallet isn't used as a fallback.`;
+    // Refused by the service's own checks, before anything was reserved.
+    if ([400, 405, 413].includes(e.status)) return `${msg}${used ? "" : " Nothing was used."}`;
+    if (e.status === 503 && (e.body?.busy || /^busy:/i.test(msg))) {
+      const wait = Number(e.body?.retry_after_s);
+      return `Agent Referee is busy right now, so it refused before the review started; nothing was used from the team allowance.${Number.isFinite(wait) && wait > 0 ? ` Try again in about ${Math.round(wait)} s.` : " Try again in a minute."} (${msg.slice(0, 200)})`;
+    }
+    if (e.status === 503) return `${bare}. In rare cases (the allowance's record timing out) it stays counted anyway; ${review ? "check team_allowance before retrying" : "try again in a minute"}.`;
+    return `${bare} (HTTP ${e.status}). ${review ? "The review may or may not have been counted against the team allowance: " : ""}${check}.`;
   }
-  return explain(e, {});
+  const msg = String(e?.message ?? e).slice(0, 200);
+  const cause = String(e?.cause?.message ?? "").slice(0, 200);
+  if (/redirect/i.test(`${msg} ${cause}`)) return `The service answered a team request with a redirect, which team mode refuses so the token can't be sent elsewhere. Check AGENT_REFEREE_URL. Nothing was sent past the redirect.`;
+  return review
+    ? `The connection to Agent Referee failed before an answer came back (${msg}${cause ? `: ${cause}` : ""}). If the review finished anyway, it was counted against the team allowance: ${check}.`
+    : `The connection to Agent Referee failed (${msg}${cause ? `: ${cause}` : ""}). Status page: https://stats.uptimerobot.com/dh6sVMvo3W`;
 }
 
 const LABEL = { type: "string", pattern: "^[A-Za-z0-9_-]{1,32}$", description: "a seat label: letters, digits, _ or -, up to 32 characters" };
@@ -159,7 +177,7 @@ function matchSummary(st, mySeat) {
 export function createTools({ config, makeClient, makePayingFetch, budget, receipts, baseFetch }) {
   const pinned = config.publicKeys;
   const team = config.team ?? null;
-  const teamClient = () => makeClient({ url: config.url, fetch: makeTeamFetch(team, baseFetch), publicKeys: pinned });
+  const teamClient = () => makeClient({ url: config.url, fetch: makeTeamFetch(team, config.url ?? DEFAULT_URL, baseFetch), publicKeys: pinned });
   const demoClient = (extra = {}) => makeClient({ url: config.url, demo: true, publicKeys: pinned, pollMs: 1000, ...extra });
 
   // ---------- demo_match: free, plays both seats in one call ----------
@@ -303,7 +321,7 @@ export function createTools({ config, makeClient, makePayingFetch, budget, recei
         },
         description: "For review-3x2 (exactly 2 pieces) and review-3x3 (exactly 3), instead of output: the work in parts that belong together, e.g. code and its tests. Up to 36,000 characters in all. Every reviewer reads every piece. The receipt is tied to each piece's exact text, its name and the order.",
       },
-      tier: { type: "string", enum: ["review", "review-3", "review-3x2", "review-3x3"], description: "review: one reviewer (by default Claude Sonnet), $0.05. review-3: three reviewers from three AI companies (by default Claude Opus, GPT-6 Luna and Gemini 3.7 Flash), majority verdict, $0.20. review-3x2 / review-3x3: the work as 2 or 3 pieces (use pieces, not output), three reviewers from three companies each read every piece, $0.60 / $0.70, paid only (needs the owner's wallet; no free allowance). Default review. The exact models are in the receipt and at GET https://agentreferee.ai/reviewers." },
+      tier: { type: "string", enum: ["review", "review-3", "review-3x2", "review-3x3"], description: "review: one reviewer (by default Claude Sonnet), $0.05. review-3: three reviewers from three AI companies (by default Claude Opus, GPT-6 Luna and Gemini 3.7 Flash), majority verdict, $0.20. review-3x2 / review-3x3: the work as 2 or 3 pieces (use pieces, not output), three reviewers from three companies each read every piece, $0.60 / $0.70, paid only (needs the owner's wallet or team allowance; no free allowance). Default review. The exact models are in the receipt and at GET https://agentreferee.ai/reviewers." },
       title: titleSchema,
       criteria: {
         type: "array",
@@ -321,7 +339,7 @@ export function createTools({ config, makeClient, makePayingFetch, budget, recei
       free: {
         type: "boolean",
         description:
-          "Use one of today's free reviews instead of paying (each address gets 3 single-reviewer and 1 review-3 a day, inside a daily budget shared by everyone, so they can run out). Without a wallet set up, reviews are always free. With a wallet, reviews are paid unless this is true. Not available for review-3x2 and review-3x3.",
+          "Use one of today's free reviews instead of paying (each address gets 3 single-reviewer and 1 review-3 a day, inside a daily budget shared by everyone, so they can run out). With the owner's team allowance set up, reviews use it unless this is true. Otherwise, without a wallet, reviews are always free, and with one they are paid unless this is true. Not available for review-3x2 and review-3x3.",
       },
     },
     additionalProperties: false,
@@ -368,7 +386,7 @@ export function createTools({ config, makeClient, makePayingFetch, budget, recei
       progress(`Sending to ${reviewersLabel(tier)} (team allowance, member ${team.member})…`);
       r = await ref._call("POST", `/team/${tier}`, body);
     } catch (e) {
-      throw new ToolError(explainTeam(e));
+      throw new ToolError(explainTeam(e, { review: true }));
     }
     if (!r?.result || !r?.receipt) throw new ToolError("The service answered, but its review couldn't be read, so there's no receipt to show. It may have been counted against the team allowance: check with team_allowance.");
     let check;

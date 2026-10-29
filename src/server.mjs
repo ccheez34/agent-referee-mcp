@@ -66,7 +66,7 @@ export async function main(env = process.env) {
     process.exit(1);
   }
   process.stderr.write(
-    `[agent-referee-mcp] ${VERSION} ready. Paid reviews: ${config.privateKey ? `on, daily cap $${(config.dailyLimitMicro / 1e6).toFixed(2)}` : "off (no AGENT_REFEREE_PRIVATE_KEY); free reviews only"}. ${config.team ? `Team allowance: on, as member ${config.team.member} (${config.team.token ? "token from AGENT_REFEREE_TEAM_TOKEN" : "no token set here: the network must add x-team-token"}); sealed_review uses it instead of the wallet. ` : ""}Receipts: ${config.saveReceipts ? join(config.dataDir, "receipts") : "not saved"}.\n`,
+    `[agent-referee-mcp] ${VERSION} ready. Paid reviews: ${config.privateKey ? `on, daily cap $${(config.dailyLimitMicro / 1e6).toFixed(2)}` : `off (no AGENT_REFEREE_PRIVATE_KEY)${config.team ? "" : "; free reviews only"}`}. ${config.team ? `Team allowance: on, as member ${config.team.member} (${config.team.token ? "token from AGENT_REFEREE_TEAM_TOKEN" : "no token set here: the network must add x-team-token"}); sealed_review uses it instead of the wallet. ` : ""}Receipts: ${config.saveReceipts ? join(config.dataDir, "receipts") : "not saved"}.\n`,
   );
   await runStdio({ info: SERVER_INFO, instructions: INSTRUCTIONS, tools: buildTools(config) });
 }
