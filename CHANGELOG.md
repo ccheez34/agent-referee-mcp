@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Skills (maintained by Claude 2.0): new `team-autonomy` (several sessions on one project with the owner mostly
+  away). `independent-check` covers multi-part checks, runs planned ahead, the team allowance (shared token kept out
+  of sessions, `x-team-member`, daily budgets and run pools) and rating each review. `handoff` says when a lighter
+  handoff (or none) is better, when a check is worth paying for, how the user hands it over and what to paste, and
+  the multi-part judge tiers.
+
 ## 0.4.0 (2026-10-29)
 
 - **`verify_receipt` checks multi-part judge receipts (`judge-multi-v1`, tiers `judge-3x2` and `judge-3x3`).** Pass

@@ -1,6 +1,6 @@
 ---
 name: handoff
-description: Write a handoff for the next AI session or person and get it independently checked with Agent Referee, verify a handoff you received, or settle two versions that disagree. Use when work changes hands.
+description: Pick the right size of handoff, write it for the next AI session or person, tell the user how to hand it over, get it independently checked with Agent Referee, verify a handoff you received, or settle two versions that disagree. Use when work changes hands.
 ---
 
 # Handoffs that the next session can trust
@@ -22,13 +22,25 @@ The `independent-check` skill has the details of sealed review: neutral tasks, b
 
 For a short note to the same user in the same conversation, just write it. This skill is for handoffs someone else will act on.
 
-## Spending: the user agrees first, every time
+## Pick the size first
+
+A handoff should be as long as the next session needs, and no longer. Ask the user which size they want when it isn't clear; suggest one:
+- **None:** the work continues in the same conversation, or the next session will start the task from scratch anyway.
+- **A two-line note:** name and role, plus where the ground rules are (for example "You are 3.5, the clients owner. Read `messages/README.md` first."). Use it when the next session should find the current state itself from the code, the files and the messages, for example a fresh session in an experiment, or a team whose files are kept up to date. Don't check it.
+- **A short handoff,** under about a page: purpose, owner rules, where the files are, the open items. For one task moving to one session.
+- **The full structure below:** several sessions at once, a role with open work across several areas, or a handoff that starts a large build.
+
+Long handoffs get skimmed, and every stale line in one is a line the next session may act on. When in doubt, choose the shorter one and say where the rest can be found.
+
+## Spending: the user agrees first
 
 Every paid action needs the user's clear yes, in the chat, before it runs: each review, each batch, a fresh check after fixes, and each judge match. Say what will be sent, how many runs, and the total cost. Take prices from the service, not from memory: `GET /reviewers` for reviews, and the root JSON (`GET /?format=json`, under `tiers`) for judge seats. Never add runs after an unwanted verdict to get a different one.
 
+The one exception is a team allowance the owner set up and the service shows you: reviews inside it follow `independent-check`'s "Team allowance" section, with its limits and run count. Judge matches are never covered by an allowance.
+
 ## 1. Write it
 
-Use this structure. Leave out a section only when it truly doesn't apply.
+For a full handoff, use this structure. Leave out a section when it doesn't apply or the reader already has it elsewhere (then say where).
 
 1. **Purpose and reader:** who it's for, what they'll do first, and which document wins if two disagree (usually: the code wins, then this handoff).
 2. **Owner rules:** what never to do (secrets, names, deploys, payments), and who does what: who deploys, who pays, who approves.
@@ -43,7 +55,8 @@ The record of the check goes in a separate Checks note (section 4 below), not in
 Rules for the writing:
 - **State facts, not impressions.** "All 190 tests passed (run of Oct 28, 17:35)" beats "tests are fine". A claim the next session can't check is a claim it can't rely on.
 - **Separate confirmed from likely.** Say which is which.
-- **Write it to a file,** not only into the chat. Save it where the next session will look.
+- **Write it to a file,** not only into the chat. Name it for who it's from and to, for example `HANDOFF-2.0-to-2.5.md`, and put the date and time at the top. Ask the user where the next session will be able to open it: a shared project folder, the repo, or nowhere (then it gets pasted, see section 5).
+- **Point to files rather than copying them,** with exact paths, so the handoff stays short and doesn't go stale where the files change.
 
 ## 2. Prepare the check
 
@@ -70,10 +83,12 @@ Keep the brief neutral, as in independent-check. With one review per piece (belo
 
 ## 3. Run the check
 
+**Is it worth checking?** A check costs money and time. Suggest one when the next session will build, deploy, spend or decide on the handoff's claims, when several sessions will rely on it, or when the user asks. Skip it for a two-line note or a short handoff whose claims the next session will check against the code anyway, and say so. The user decides.
+
 Pick the tier:
 - **One piece: `review-3`.** Three reviewers from three AI companies.
 - **2 or 3 pieces: `review-3x2` or `review-3x3` (multi-part), the default for a long handoff.** One review in which every reviewer reads every piece, so contradictions between pieces get caught. They opened on Oct 28, 2026, at $0.60 for 2 pieces and $0.70 for 3; take the current price from `GET /reviewers`. They're paid only: the free daily reviews don't cover them, so the user needs a wallet set up. Use them when both of these hold:
-  - the user's tool accepts `pieces`: the MCP `sealed_review` from `agent-referee-mcp` 0.3.0, or `agent-referee-client` 0.9.0 (JS) or 0.2.0 (Python). Older versions refuse multi-part receipts, so update first if needed.
+  - the user's tool accepts `pieces`: the MCP `sealed_review` from `agent-referee-mcp` 0.3.0 or later, or `agent-referee-client` 0.9.0 (JS) or 0.2.0 (Python) or later. Older versions refuse multi-part receipts, so update first if needed.
   - the user has agreed the price
 - **More than 3 pieces:** groups of up to 3, one multi-part review per group (section 2).
 - **Otherwise (an older tool, or no wallet): one `review-3` per piece.** Each piece is reviewed alone, so read across the results yourself for contradictions between pieces. The cost is the number of pieces times the review-3 price.
@@ -101,15 +116,24 @@ Run it and keep the receipts as in independent-check.
    - which form was delivered, and what wasn't covered by a check
 6. **Be honest about what the receipts show.** These reviewers gave these verdicts about these exact pieces. That isn't proof the handoff is correct.
 
-## 5. Receiving a handoff
+## 5. Hand it over
 
-1. **Read it, then verify its checks.** For each receipt, run `verify_receipt` with the exact brief and piece files from the check folder. A multi-part receipt needs every piece, in order, and a tool new enough to read it (`agent-referee-mcp` 0.3.0, or the clients above). A receipt you can't verify counts as no check.
+Tell the user, in a few lines, exactly what to do:
+1. **Where the handoff is:** its full path, and the Checks note's if there is one.
+2. **How to start the next session:** a new chat, in the same project or environment as the work (for example the one that holds the files, the repo access or a team allowance), so it can reach what the handoff points to.
+3. **What to paste as the first message,** ready to copy, for example: "You are 2.5, taking over the server role from 2.0. Read `research/handoffs/HANDOFF-2.0-to-2.5.md` first, then confirm in your first reply what you could and couldn't open or verify." Keep secrets out of it, as everywhere.
+4. **If the next session can't open the files** (no shared folder, another app, another person): paste the handoff itself instead, or attach it. For a checked handoff, attach the piece files, the brief and the receipts too, or say the check can't be verified from the paste. A file path the reader can't open is no handoff.
+5. **What to look for in its first reply:** that it names its role correctly, opened the handoff, and lists what it couldn't confirm. If it didn't, point it back to the file before it starts work.
+
+## 6. Receiving a handoff
+
+1. **Read it, then verify its checks.** For each receipt, run `verify_receipt` with the exact brief and piece files from the check folder. A multi-part receipt needs every piece, in order, and a tool new enough to read it (`agent-referee-mcp` 0.3.0 or later, or the clients above; `judge-multi-v1` judge receipts need `agent-referee-mcp` 0.4.0, or `agent-referee-client` 0.10.0 (JS) or 0.3.0 (Python)). A receipt you can't verify counts as no check.
 2. **Read the brief yourself.** A weak brief gets an easy pass.
 3. **Read the FINDINGS and the Checks note.** Know which form you have, and which parts were never checked.
 4. **Treat every claim as a claim.** Check what you'll act on against the code, the live service or the tests before you build on it.
-5. **Tell the user what you couldn't confirm,** in your first reply.
+5. **Tell the user what you couldn't confirm,** in your first reply, including any file the handoff points to that you couldn't open.
 
-## 6. When two versions disagree
+## 7. When two versions disagree
 
 **Settle the facts first:** read the code, run the tests, check the live service. Most disagreements end there.
 
@@ -118,11 +142,11 @@ When a judgment is still needed, for example which version is more accurate and 
 - **Use an Agent Referee `judge-3` match:** three judges from three AI companies. Each version is one side's position, at most 6,000 characters.
 - **Versions are usually longer,** so submit the same disputed sections from each side, cut to fit, and say in the rules which sections they are. Both sides must agree which sections go in, since that choice affects the outcome.
 - **The rules say what "better" means,** for example: "more accurate against the evidence quoted in the positions, then more complete; nothing else counts." Positions have no separate attachments, so any evidence goes inside them.
-- **Multi-part judge tiers** (2 or 3 pieces of 6,000 characters per side) were planned but not built on Oct 28. Use them only if the root JSON's `tiers` lists them.
+- **Multi-part judge tiers:** `judge-3x2` and `judge-3x3` take 2 or 3 pieces per side, each up to 6,000 characters, so longer sections fit without cutting. They opened on Oct 29, 2026; take the current seat prices from the root JSON's `tiers`. Their receipts (`judge-multi-v1`) need `agent-referee-mcp` 0.4.0, or `agent-referee-client` 0.10.0 (JS) or 0.3.0 (Python), to play and to verify. With an older tool, use `judge-3`.
 - **The same privacy scan as section 2 applies** to both positions and the rules.
 - **Before anyone pays:**
   - Both sides agree on the tier, the panel, the rules and the sections.
-  - The user agrees the cost (the seat price from the root JSON, times the seats they pay for).
+  - The user agrees the cost: each side pays for its own seat, so the user pays one seat price from the root JSON (the other side pays for theirs), unless the user takes both seats.
   - Say how paying works: each seat pays when it joins, and the payments settle when the table fills, before either side submits anything. A seat whose counterpart never joins is released uncharged. A mistrial is still charged, and a match that can't be judged at all is refunded by hand from the operator's refund list.
 - **The verdict says which version the judges preferred and why.** It doesn't merge them. The user decides what to keep.
 
