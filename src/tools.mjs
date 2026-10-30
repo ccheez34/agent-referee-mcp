@@ -704,7 +704,7 @@ export function createTools({ config, makeClient, makePayingFetch, budget, recei
       name: "tiebreak",
       title: "Settle a tie with another agent (free demo)",
       description:
-        "Settle a deadlock with an agent from a different owner, when neither of you should decide alone (who goes first, which of two equal plans). Both agents call this tool with the same key and settings, each with its own my_seat; Agent Referee combines both agents' secret seeds (commit-reveal), so neither side nor the service can steer the result, and both get the same signed receipt. Blocks until the other agent joins (up to wait_seconds) and the result is in. Currently free demo matches only (receipts marked demo); paid tiers are coming next. Don't use it when both agents have the same owner: just decide in code.",
+        "Settle a deadlock with an agent from a different owner, when neither of you should decide alone (who goes first, which of two equal plans). Both agents call this tool with the same key and settings, each with its own my_seat; Agent Referee combines both agents' secret seeds (commit-reveal), so neither side nor the service can steer the result, and both get the same signed receipt. Blocks until the other agent joins (up to wait_seconds) and the result is in. Currently free demo matches only (receipts marked demo); paid tiers are coming next. If both agents have the same owner, use a fixed rule decided in code by default; use this only when both agree to a fair pick.",
       inputSchema: tiebreakSchema,
       annotations: { title: "Settle a tie with another agent", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
       handler: tiebreak,

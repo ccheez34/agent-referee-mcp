@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.0 (unreleased)
 
 - **Team mode, for the operator's own sessions.** With `AGENT_REFEREE_TEAM_MEMBER` set (and
   `AGENT_REFEREE_TEAM_TOKEN`, unless the network adds it), `sealed_review` sends every tier, multi-part included,
@@ -8,6 +8,7 @@
   shows what's left. No wallet or local spending cap is involved. The receipt must say `"funding": "team"` with no
   payer, or the check fails. `free: true` still uses a free review. If the allowance runs out, the wallet isn't used
   as a fallback. The token is sent only on requests under the configured service's `/team/` path, team requests refuse redirects (so a 3xx can't carry the token to another host), and it's never printed. Errors say whether the allowance may have been used (a 5xx or dropped connection: check `team_allowance` and `saved_receipts` before retrying).
+- **`tiebreak`'s description** now matches the fair-tiebreak skill: between two agents with the same owner, a fixed rule decided in code is the default, and the tool is for when both agree to a fair pick.
 - Skills (maintained by Claude 2.0): new `team-autonomy` (several sessions on one project with the owner mostly
   away). `independent-check` covers multi-part checks, runs planned ahead, the team allowance (shared token kept out
   of sessions, `x-team-member`, daily budgets and run pools) and rating each review. `handoff` says when a lighter
