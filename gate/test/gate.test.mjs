@@ -29,8 +29,10 @@ test("policy: the owner's approval key can't also be a receipt key", () => {
 });
 
 test("policy: an L1 github_checks requirement must name the checks that matter", () => {
-  const text = JSON.stringify(policyObject({ done: { merge: { require: [{ level: "L1", check: "github_checks", max_age_minutes: 60 }] } } }));
-  assert.throws(() => loadPolicy(text, sha256OfText(text)), /required_checks/);
+  for (const required_checks of [undefined, ["test"], [{ name: "test" }]]) {
+    const text = JSON.stringify(policyObject({ done: { merge: { require: [{ level: "L1", check: "github_checks", required_checks, max_age_minutes: 60 }] } } }));
+    assert.throws(() => loadPolicy(text, sha256OfText(text)), /required_checks/);
+  }
 });
 
 test("config: member, state folder and an https approvals source are required", async () => {
@@ -218,12 +220,12 @@ test("a stale observation is refused, and so is one from the future", async () =
 test("a required check still running, failed, missing, or a truncated list: refused", async () => {
   const g = await gate();
   const cases = [
-    [{ name: "test", status: "in_progress", conclusion: null, completed_at: null }],
-    [{ name: "test", status: "completed", conclusion: "failure", completed_at: iso(NOW) }],
-    [{ name: "lint", status: "completed", conclusion: "success", completed_at: iso(NOW) }],
+    [{ name: "test", app: "github-actions", status: "in_progress", conclusion: null, completed_at: null }],
+    [{ name: "test", app: "github-actions", status: "completed", conclusion: "failure", completed_at: iso(NOW) }],
+    [{ name: "lint", app: "github-actions", status: "completed", conclusion: "success", completed_at: iso(NOW) }],
     [
-      { name: "test", status: "completed", conclusion: "success", completed_at: iso(NOW) },
-      { name: "build", status: "completed", conclusion: "failure", completed_at: iso(NOW) },
+      { name: "test", app: "github-actions", status: "completed", conclusion: "success", completed_at: iso(NOW) },
+      { name: "build", app: "github-actions", status: "completed", conclusion: "failure", completed_at: iso(NOW) },
     ],
   ];
   for (const runs of cases) assert.equal((await g.call("submit_done", { kind: "merge", subject: commit, receipts: [checksReceipt({ runs })] })).accepted, false, JSON.stringify(runs));
@@ -363,4 +365,115 @@ test("a real review-3 receipt (signed by the live service's key) is a 2-1, so it
   const why = JSON.stringify(r.unmet);
   assert.match(why, /three \\"pass\\" votes/); // the signature and the recomputation passed; the votes didn't
   assert.doesNotMatch(why, /signature/);
+});
+
+// ---------------- after the fresh read of 9318fdd (findings 1-10) ----------------
+
+test("F1: a kind mixing a commit and a hash needs the owner's explicit allow_unbound_pair, and the record says unbound", async () => {
+  const p = policyObject();
+  delete p.done.release.allow_unbound_pair;
+  const text = JSON.stringify(p);
+  assert.throws(() => loadPolicy(text, sha256OfText(text)), /allow_unbound_pair/);
+  const g = await gate();
+  const r = await g.call("submit_done", { kind: "release", subject: { ...commit, sha256: DIFF_SHA256 }, receipts: [checksReceipt(), reviewReceipt()] });
+  assert.equal(r.accepted, true);
+  assert.equal(r.pair_bound, false);
+});
+
+test("F2: a pinned brief (task_sha256) refuses a review briefed with another task; the record keeps the brief's hash", async () => {
+  const pinned = "c".repeat(64);
+  const policy = pinnedPolicy({ done: { reviewed: { require: [{ level: "L2", check: "panel_pass", max_age_minutes: 1440, task_sha256: "9".repeat(64) }] } } });
+  const g = await gate({ policy });
+  const r = await g.call("submit_done", { kind: "reviewed", subject: { sha256: DIFF_SHA256 }, receipts: [reviewReceipt()] });
+  assert.match(JSON.stringify(r.unmet), /different task/);
+  const open = await gate();
+  const ok = await open.call("submit_done", { kind: "reviewed", subject: { sha256: DIFF_SHA256 }, receipts: [reviewReceipt()] });
+  assert.deepEqual(ok.review_task_sha256, [pinned]);
+});
+
+test("F3: unprefixed ids can't pose as three companies; claude-* and anthropic/ are one company, in any case", async () => {
+  const g = await gate();
+  const s = { sha256: DIFF_SHA256 };
+  for (const models of [["gpt-6-luna", "gpt-6-mini", "o5"], ["claude-opus-5-5", "Anthropic/claude-x", "google/gemini"], ["claude-a", "anthropic/claude-b", "google/x"], ["OpenAI/a", "openai/b", "google/c"]])
+    assert.equal((await g.call("submit_done", { kind: "reviewed", subject: s, receipts: [reviewReceipt({ models })] })).accepted, false, models.join(","));
+});
+
+test("F4: a revocation in the record counts even when the state folder can't be listed; an unreadable state fails closed", async () => {
+  const a = approval({ max_uses: 5 });
+  const g = await gate({ records: [a, revocation(a.payload.nonce)] });
+  const realList = g.state.list.bind(g.state);
+  g.state.list = async (prefix) => (prefix === "revoked-" ? [] : realList(prefix));
+  g.state.createOnce = (orig => async (name, rec) => (name.startsWith("revoked-") ? false : orig(name, rec)))(g.state.createOnce.bind(g.state));
+  assert.equal((await g.call("check_action", DEPLOY)).allowed, false);
+  g.state.list = async () => { const e = new Error("denied"); e.code = "EACCES"; throw e; };
+  const r = await g.call("check_action", DEPLOY);
+  assert.equal(r.allowed, false);
+  assert.match(r.summary, /can't read its own records/);
+});
+
+test("F6: a required check run by another app doesn't count", async () => {
+  const g = await gate();
+  const runs = [{ name: "test", app: "some-other-app", status: "completed", conclusion: "success", completed_at: iso(NOW) }];
+  assert.match(JSON.stringify((await g.call("submit_done", { kind: "merge", subject: commit, receipts: [checksReceipt({ runs })] })).unmet), /from github-actions isn't in the receipt/);
+});
+
+test("F7: approval dates that don't parse are rejected, not treated as never expiring", async () => {
+  const g = await gate({ records: [approval({ expires_at: "2026-13-01T00:00:00Z" }), approval({ issued_at: "2026-02-31T25:00:00Z" })] });
+  const r = await g.call("check_action", DEPLOY);
+  assert.equal(r.allowed, false);
+  assert.match(r.reasons.join(" "), /real ISO time/);
+});
+
+test("F8: a member named like a built-in property gets the default limit, not unlimited", async () => {
+  for (const member of ["__proto__", "constructor", "toString"]) {
+    const g = await gate({ member });
+    assert.equal((await g.call("budget", { spend_usd: 1000, what: "x" })).reserved, false, member);
+  }
+});
+
+test("F9: the same key in another base64 spelling is refused, so approval and receipt keys can't be the same bytes", () => {
+  const B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  const alt = owner.pub.slice(0, 42) + B64[B64.indexOf(owner.pub[42]) ^ 1] + "="; // the unused low bits differ
+  assert.equal(Buffer.from(alt, "base64").equals(Buffer.from(owner.pub, "base64")), true);
+  const text = JSON.stringify(policyObject({ receipt_keys: [alt] }));
+  assert.throws(() => loadPolicy(text, sha256OfText(text)), /canonical spelling|different keys/);
+});
+
+test("F10: a once-only record is never empty, and a crashed budget holder doesn't wedge the budget", async () => {
+  const { writeFile, utimes } = await import("node:fs/promises");
+  const g = await gate();
+  assert.equal(await g.state.createOnce("lock-x", { holder: "3.0" }), true);
+  assert.deepEqual(await g.state.read("lock-x"), { holder: "3.0" });
+  const day = new Date(NOW).toISOString().slice(0, 10);
+  const stale = g.state.path(`mutex-spend-3.0-${day}`);
+  await writeFile(stale, "");
+  const old = new Date(Date.now() - 60_000);
+  await utimes(stale, old, old);
+  assert.equal((await g.call("budget", { spend_usd: 0.2, what: "after a crash" })).reserved, true);
+});
+
+test("gaps: L2 created in the future, an accepted github_commit, a pending status, and budgets across two processes", async () => {
+  const g = await gate();
+  assert.equal((await g.call("submit_done", { kind: "reviewed", subject: { sha256: DIFF_SHA256 }, receipts: [reviewReceipt({ createdAt: NOW + 3_600_000 })] })).accepted, false);
+  const commitOnly = await gate({ policy: pinnedPolicy({ done: { exists: { require: [{ level: "L1", check: "github_commit", max_age_minutes: 60 }] } } }) });
+  assert.equal((await commitOnly.call("submit_done", { kind: "exists", subject: commit, receipts: [checksReceipt({ check: "github_commit" })] })).accepted, true);
+  assert.equal((await g.call("submit_done", { kind: "merge", subject: commit, receipts: [checksReceipt({ statuses: [{ context: "ci", state: "pending", updated_at: iso(NOW) }] })] })).accepted, false);
+  const g2 = await gate({ dir: g.dir, approvalsFile: g.file });
+  const out = await Promise.all(Array.from({ length: 8 }, (_, i) => (i % 2 ? g : g2).call("budget", { spend_usd: 0.2, what: "x" })));
+  assert.equal(out.filter((r) => r.reserved).length, 5);
+});
+
+test("the state folder failing to list (not just missing) throws, so callers fail closed", async () => {
+  const { GateState } = await import("../src/state.mjs");
+  const g = await gate();
+  const notAFolder = new GateState(g.file); // a file, not a folder: readdir gives ENOTDIR
+  await assert.rejects(notAFolder.list("revoked-"), /ENOTDIR/);
+  const missing = new GateState(join(tmpdir(), `nope-${hex(6)}`));
+  assert.deepEqual(await missing.list("x"), []);
+});
+
+test("one reviewer from an unnamed company with two named ones isn't three named companies", async () => {
+  const g = await gate();
+  const r = await g.call("submit_done", { kind: "reviewed", subject: { sha256: DIFF_SHA256 }, receipts: [reviewReceipt({ models: ["gpt-6-luna", "anthropic/claude-x", "google/gemini"] })] });
+  assert.equal(r.accepted, false);
 });

@@ -5,6 +5,9 @@ import { createHash } from "node:crypto";
 
 export const POLICY_FORMAT = "agent-referee-gate-policy-v1";
 const KEY = /^[A-Za-z0-9+/]{43}=$/; // a base64 Ed25519 public key (32 bytes)
+// Canonical spelling only: the same 32 bytes have several base64 spellings, so keys are compared as decoded bytes too.
+const canonicalKey = (k) => KEY.test(k) && Buffer.from(k, "base64").length === 32 && Buffer.from(k, "base64").toString("base64") === k;
+const SUBJECT_OF = { L0: "sha256", L1: "commit", L2: "sha256" };
 const NAME = /^[a-z][a-z0-9_]{0,39}$/;
 const HEX64 = /^[0-9a-f]{64}$/;
 
@@ -33,9 +36,10 @@ export function loadPolicy(text, pinnedSha256) {
       if (kind !== "owner_only" && kind !== "open") problems.push(`Action "${name}" must be "owner_only" or "open".`);
     }
   for (const field of ["approval_keys", "receipt_keys"]) {
-    if (!Array.isArray(p[field]) || !p[field].length || !p[field].every((k) => KEY.test(k))) problems.push(`${field} must be a non-empty list of base64 Ed25519 public keys.`);
+    if (!Array.isArray(p[field]) || !p[field].length || !p[field].every(canonicalKey)) problems.push(`${field} must be a non-empty list of base64 Ed25519 public keys, each in its canonical spelling.`);
   }
-  if (Array.isArray(p.approval_keys) && Array.isArray(p.receipt_keys) && p.approval_keys.some((k) => p.receipt_keys.includes(k)))
+  const bytes = (k) => Buffer.from(String(k), "base64").toString("hex");
+  if (Array.isArray(p.approval_keys) && Array.isArray(p.receipt_keys) && p.approval_keys.some((k) => p.receipt_keys.map(bytes).includes(bytes(k))))
     problems.push("An approval key is also a receipt key. The owner's approvals and Agent Referee's receipts must be signed by different keys, so neither can make the other.");
   const skew = p.clock_skew_seconds ?? 120;
   if (!Number.isInteger(skew) || skew < 0 || skew > 900) problems.push("clock_skew_seconds must be an integer from 0 to 900.");
@@ -53,9 +57,18 @@ export function loadPolicy(text, pinnedSha256) {
           (r.level === "L2" && (r.check ?? "panel_pass") === "panel_pass");
         if (!ok) problems.push(`${at}: level and check must be L0 stamp, L1 github_commit, L1 github_checks or L2 panel_pass.`);
         if (!Number.isInteger(r.max_age_minutes) || r.max_age_minutes < 1) problems.push(`${at}: max_age_minutes must be a whole number of minutes, at least 1.`);
-        if (r.check === "github_checks" && (!Array.isArray(r.required_checks) || !r.required_checks.length || !r.required_checks.every((n) => typeof n === "string" && n)))
-          problems.push(`${at}: github_checks needs required_checks, the check names that must have passed.`);
+        if (r.check === "github_checks" && (!Array.isArray(r.required_checks) || !r.required_checks.length || !r.required_checks.every((c) => typeof c?.name === "string" && c.name && typeof c?.app === "string" && c.app)))
+          problems.push(`${at}: github_checks needs required_checks: [{"name": "...", "app": "github-actions"}], each check that must have passed and the GitHub app that must have run it.`);
+        if (r.task_sha256 !== undefined && (r.level !== "L2" || !HEX64.test(String(r.task_sha256))))
+          problems.push(`${at}: task_sha256 pins the brief of an L2 review, as 64 lower-case hex characters.`);
       });
+    // A kind that mixes a commit requirement with a hash requirement can't show that the hash belongs to the commit
+    // (no receipt binds them yet), so the owner must say so explicitly; the done record then marks the pair unbound.
+    if (Array.isArray(rule?.require)) {
+      const kinds = new Set(rule.require.map((r) => SUBJECT_OF[r.level]).filter(Boolean));
+      if (kinds.size > 1 && rule.allow_unbound_pair !== true)
+        problems.push(`done.${kind} mixes a commit requirement (L1) with a hash requirement (L0 or L2). Nothing proves the hash is that commit's, so set "allow_unbound_pair": true only if you accept that; the done record will say the pair is unbound.`);
+    }
   }
   const budgets = p.budgets ?? {};
   for (const [member, usd] of Object.entries(budgets.daily_usd ?? {}))

@@ -40,12 +40,13 @@ export function policyObject(over = {}) {
     receipt_keys: [referee.pub],
     clock_skew_seconds: 120,
     done: {
-      merge: { require: [{ level: "L1", check: "github_checks", required_checks: ["test"], max_age_minutes: 60 }] },
+      merge: { require: [{ level: "L1", check: "github_checks", required_checks: [{ name: "test", app: "github-actions" }], max_age_minutes: 60 }] },
       reviewed: { require: [{ level: "L2", check: "panel_pass", max_age_minutes: 1440 }] },
       stamped: { require: [{ level: "L0", check: "stamp", max_age_minutes: 60 }] },
       release: {
+        allow_unbound_pair: true,
         require: [
-          { level: "L1", check: "github_checks", required_checks: ["test"], max_age_minutes: 60 },
+          { level: "L1", check: "github_checks", required_checks: [{ name: "test", app: "github-actions" }], max_age_minutes: 60 },
           { level: "L2", check: "panel_pass", max_age_minutes: 1440 },
         ],
       },

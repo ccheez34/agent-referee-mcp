@@ -15,14 +15,15 @@ function shapeProblem(p) {
   if (!p || typeof p !== "object") return "no payload";
   if (p.format !== APPROVAL_FORMAT) return `format isn't ${APPROVAL_FORMAT}`;
   if (!NONCE.test(String(p.nonce ?? ""))) return "nonce must be 24 to 64 lower-case hex characters";
-  if (!ISO.test(String(p.issued_at ?? ""))) return "issued_at must be an ISO time in UTC";
+  const validTime = (v) => ISO.test(String(v ?? "")) && Number.isFinite(Date.parse(v));
+  if (!validTime(p.issued_at)) return "issued_at must be a real ISO time in UTC";
   if (p.type === "revocation") return null;
   if (p.type !== "approval") return 'type must be "approval" or "revocation"';
   if (typeof p.action !== "string" || !p.action) return "action is missing";
   if (typeof p.target !== "string" || !p.target) return "target is missing";
   if (p.target_sha256 !== null && !HEX64.test(String(p.target_sha256))) return "target_sha256 must be 64 lower-case hex characters, or null";
   if (typeof p.policy_version !== "string") return "policy_version is missing";
-  if (!ISO.test(String(p.expires_at ?? ""))) return "expires_at must be an ISO time in UTC";
+  if (!validTime(p.expires_at)) return "expires_at must be a real ISO time in UTC";
   const uses = p.max_uses ?? 1;
   if (!Number.isInteger(uses) || uses < 1 || uses > MAX_USES) return `max_uses must be 1 to ${MAX_USES}`;
   return null;

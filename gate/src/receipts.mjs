@@ -13,7 +13,12 @@ const HEX40 = /^[0-9a-f]{40}$/;
 const REPO = /^[a-z0-9](?:[a-z0-9-]{0,38})\/[a-z0-9._-]{1,100}$/;
 const PASSING = new Set(["success"]);
 
-const companyOf = (m) => (m.includes("/") ? m.split("/")[0] : m.startsWith("claude") ? "anthropic" : `other:${m}`);
+// As the client's companyOfModel, but case-insensitive: the prefix before "/", "claude-*" is Anthropic, and every other
+// unprefixed id counts as one group ("other"), so unprefixed ids can't pose as three companies.
+const companyOf = (m) => {
+  const id = String(m).toLowerCase();
+  return id.includes("/") ? id.split("/")[0] : id.startsWith("claude") ? "anthropic" : "other";
+};
 
 /** Normalizes the subject the caller says it's submitting (spec §4). Returns { subject } or { error }. */
 export function normalizeSubject(s) {
@@ -65,13 +70,14 @@ export async function receiptProblem(receipt, req, subject, { receiptKeys, now, 
     if (p.tier !== "review-3") return `an L2 pass must be a review-3, not ${String(p.tier).slice(0, 30)}`;
     if (!subject.sha256) return "an L2 requirement needs subject.sha256 (the hash of the exact file or diff reviewed)";
     if (p.output_sha256 !== subject.sha256) return "the review is about a different output than subject.sha256";
+    if (req.task_sha256 && p.task_sha256 !== req.task_sha256) return "the review was briefed with a different task than the one the policy pins";
     const check = await verifyReviewOutcome(receipt, {});
     if (!check.ok) return `the review receipt doesn't recompute: ${check.problems.join("; ").slice(0, 300)}`;
     const votes = p.votes ?? [];
     if (votes.length !== 3) return "a panel pass needs exactly three votes";
     if (!votes.every((v) => v?.verdict === "pass")) return `a panel pass needs three "pass" votes; this one is ${votes.map((v) => v?.verdict).join(", ")}, a list of work to do`;
     const companies = new Set((p.reviewers?.models ?? []).map((m) => companyOf(String(m))));
-    if (companies.size !== 3) return "the three reviewers aren't from three different AI companies";
+    if (companies.size !== 3 || companies.has("other")) return "the three reviewers aren't from three different, named AI companies";
     return ageProblem(p.created_at, req.max_age_minutes, now, skewMs, "the review's created_at");
   }
 
@@ -99,9 +105,9 @@ export async function receiptProblem(receipt, req, subject, { receiptKeys, now, 
   const runs = Array.isArray(o.check_runs) ? o.check_runs : [];
   const bad = runs.filter((r) => r.status === "completed" && !PASSING.has(r.conclusion) && r.conclusion !== "skipped" && r.conclusion !== "neutral");
   if (bad.length) return `check runs didn't pass: ${bad.map((r) => `${r.name} (${r.conclusion})`).join(", ").slice(0, 300)}`;
-  for (const name of req.required_checks) {
-    const mine = runs.filter((r) => r.name === name);
-    if (!mine.length) return `the required check "${name}" isn't in the receipt`;
+  for (const { name, app } of req.required_checks) {
+    const mine = runs.filter((r) => r.name === name && r.app === app);
+    if (!mine.length) return `the required check "${name}" from ${app} isn't in the receipt`;
     if (mine.some((r) => r.status !== "completed")) return `the required check "${name}" was still running when observed, so it isn't a pass`;
     if (!mine.every((r) => PASSING.has(r.conclusion))) return `the required check "${name}" didn't succeed`;
   }

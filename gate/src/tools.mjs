@@ -49,7 +49,13 @@ export function createGateTools({ policy, state, member, approvalsSource, now = 
     const { approvals, revoked, rejected } = await sortRecords(records, policy.approval_keys);
     // A revocation, once seen, is remembered here, so removing it from the record later doesn't reopen the approval.
     for (const n of revoked) await state.createOnce(`revoked-${n}`, { seen_at: new Date(now()).toISOString() });
-    const remembered = new Set((await state.list("revoked-")).map((f) => f.slice("revoked-".length)));
+    let remembered;
+    try {
+      remembered = new Set([...revoked, ...(await state.list("revoked-")).map((f) => f.slice("revoked-".length))]);
+    } catch (e) {
+      await state.log({ tool: "check_action", ...base, allowed: false, why: "state unreadable" }).catch(() => {});
+      return { ...base, allowed: false, owner_only: true, summary: `Not allowed: the gate can't read its own records (${String(e?.code ?? e?.message ?? e).slice(0, 60)}), so it can't rule out a revocation. Tell the owner.` };
+    }
     const reasons = [];
     for (const a of approvals) {
       const m = mismatch(a, req, { policyVersion: policy.version, now: now(), skewMs, revoked: remembered });
@@ -149,7 +155,17 @@ export function createGateTools({ policy, state, member, approvalsSource, now = 
         return { accepted: false, kind: args.kind, subject, member, summary: `Not accepted: receipt ${m.receipt} was accepted by another submission a moment ago.` };
       }
     }
-    const record = { member, kind: args.kind, subject, receipts: matched.map((m) => m.id), note: args.note ?? null, at: new Date(t).toISOString() };
+    const review = (i) => args.receipts[i]?.payload?.type === "review" ? args.receipts[i].payload.task_sha256 : undefined;
+    const record = {
+      member,
+      kind: args.kind,
+      subject,
+      receipts: matched.map((m) => m.id),
+      ...(matched.some((m) => review(m.receipt - 1)) ? { review_task_sha256: matched.map((m) => review(m.receipt - 1)).filter(Boolean) } : {}),
+      ...(rule.allow_unbound_pair ? { pair_bound: false } : {}),
+      note: args.note ?? null,
+      at: new Date(t).toISOString(),
+    };
     await state.log({ tool: "submit_done", ...record, accepted: true });
     return { accepted: true, ...record, summary: `Accepted: ${args.kind} for ${subject.repo ? `${subject.repo}@${subject.sha.slice(0, 7)}` : subject.sha256.slice(0, 12)}, with ${matched.length} receipt(s). Each is now used at this gate.` };
   }
@@ -211,7 +227,8 @@ export function createGateTools({ policy, state, member, approvalsSource, now = 
 
   async function budget(args) {
     check(args, budgetSchema);
-    const limit = policy.budgets.daily_usd[member] ?? policy.budgets.default_daily_usd;
+    const limit = Object.hasOwn(policy.budgets.daily_usd, member) ? policy.budgets.daily_usd[member] : policy.budgets.default_daily_usd;
+    if (!Number.isFinite(limit) || limit < 0) throw new ToolError("The policy gives this member no valid daily limit.");
     const today = day(now());
     const key = `spend-${member}-${today}`;
     return state.withMutex(key, async () => {

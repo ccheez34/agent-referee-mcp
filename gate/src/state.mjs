@@ -2,7 +2,7 @@
 // Every record that must happen once is a file created with "wx" (fails if it exists), so two gate processes sharing
 // the folder can't both win. The folder must be out of reach of the sessions the gate binds (DESIGN §3B, §3D):
 // a session that can delete files here can undo its own used-nonce records.
-import { mkdir, open, readFile, readdir, unlink, writeFile, appendFile, rename } from "node:fs/promises";
+import { mkdir, readFile, readdir, unlink, writeFile, appendFile, rename, link, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 
@@ -23,21 +23,23 @@ export class GateState {
     return join(this.dir, name);
   }
 
-  /** Creates the file only if it doesn't exist. Returns true if this call created it. */
+  /**
+   * Creates the file only if it doesn't exist. Returns true if this call created it. The content is written to a
+   * temporary file first and then linked into place, so the name never appears empty, even after a crash.
+   */
   async createOnce(name, record) {
-    let h;
+    const final = this.path(name);
+    const tmp = this.path(`tmp-${randomBytes(8).toString("hex")}`);
+    await writeFile(tmp, JSON.stringify(record));
     try {
-      h = await open(this.path(name), "wx");
+      await link(tmp, final);
+      return true;
     } catch (e) {
       if (e?.code === "EEXIST") return false;
       throw e;
-    }
-    try {
-      await h.writeFile(JSON.stringify(record));
     } finally {
-      await h.close();
+      await unlink(tmp).catch(() => {});
     }
-    return true;
   }
 
   async read(name) {
@@ -63,8 +65,15 @@ export class GateState {
     }
   }
 
+  /** Names starting with prefix. Only a missing folder counts as empty; any other error throws, so callers fail closed. */
   async list(prefix) {
-    const names = await readdir(this.dir).catch(() => []);
+    let names;
+    try {
+      names = await readdir(this.dir);
+    } catch (e) {
+      if (e?.code === "ENOENT") return [];
+      throw e;
+    }
     return names.filter((n) => n.startsWith(prefix));
   }
 
@@ -77,18 +86,25 @@ export class GateState {
   /** Runs fn while holding a short-lived mutex file (for read-modify-write such as budgets). */
   async withMutex(name, fn, { timeoutMs = 5000, staleMs = 30_000 } = {}) {
     const lock = `mutex-${name}`;
+    const token = randomBytes(8).toString("hex");
     const started = Date.now();
     for (;;) {
-      if (await this.createOnce(lock, { at: Date.now() })) break;
-      const held = await this.read(lock).catch(() => null);
-      if (held && Date.now() - held.at > staleMs) await this.remove(lock); // a crashed holder
+      if (await this.createOnce(lock, { token, at: Date.now() })) break;
+      // A crashed holder: judged by the file's own modified time; broken only if it's still the same holder.
+      const seen = await this.read(lock).catch(() => null);
+      const age = await stat(this.path(lock)).then((s) => Date.now() - s.mtimeMs).catch(() => 0);
+      if (age > staleMs) {
+        const again = await this.read(lock).catch(() => null);
+        if (JSON.stringify(again) === JSON.stringify(seen)) await this.remove(lock);
+      }
       if (Date.now() - started > timeoutMs) throw new Error(`The gate's ${name} record is busy; try again.`);
       await new Promise((r) => setTimeout(r, 25));
     }
     try {
       return await fn();
     } finally {
-      await this.remove(lock);
+      const mine = await this.read(lock).catch(() => null);
+      if (mine?.token === token) await this.remove(lock);
     }
   }
 

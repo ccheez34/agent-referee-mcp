@@ -30,7 +30,7 @@ Part B of the rules-in-code design (`research\specs\rules-in-code-2026-10-31\DES
 | `GATE_POLICY_SHA256` | The policy's sha256, pinned by the owner. On a mismatch the gate won't start, so editing the policy stops the gate instead of loosening it. |
 | `GATE_STATE_DIR` | The gate's state folder: used nonces, accepted receipts, revocations seen, locks, spends, and `decisions.jsonl`. **It must be out of the sessions' reach** (the sandbox, part D), or a session could delete its own used-nonce records. |
 | `GATE_MEMBER` | This session's member name. |
-| `GATE_APPROVALS_URL` or `GATE_APPROVALS_FILE` | The approvals record. Part A's `GET /approvals` (https only), or a file. Its integrity comes from the signatures: whoever can write the file can delete approvals (they stop working) but can't make one. A revocation, once seen, is remembered in the state folder, so deleting it from the record later doesn't reopen anything. |
+| `GATE_APPROVALS_URL` or `GATE_APPROVALS_FILE` | The approvals record: part A's `GET /approvals` (https only), or a file. Its integrity comes from the signatures, so whoever can write the record can delete approvals (they stop working) but can't make one. **Use the URL for real use.** With a file, someone who can write it can also delete a revocation before any gate has read it, and that reopens the approval. Once a gate has seen a revocation, it remembers it in the state folder for good. A file is for tests, or for a folder the sessions can't write. |
 
 Start: `node gate/bin/agent-referee-gate.mjs` (stdio). It needs `agent-referee-client` 0.10 or later, which this repo already depends on.
 
@@ -45,8 +45,9 @@ Start: `node gate/bin/agent-referee-gate.mjs` (stdio). It needs `agent-referee-c
   "receipt_keys": ["vM2GY6ZEYc/omRlIFrzu0TaMGtjHXQtchg9d7lPKkTY="],
   "clock_skew_seconds": 120,
   "done": {
-    "merge":  { "require": [ { "level": "L1", "check": "github_checks", "required_checks": ["test"], "max_age_minutes": 60 } ] },
-    "change": { "require": [ { "level": "L1", "check": "github_checks", "required_checks": ["test"], "max_age_minutes": 60 },
+    "merge":  { "require": [ { "level": "L1", "check": "github_checks", "required_checks": [{ "name": "test", "app": "github-actions" }], "max_age_minutes": 60 } ] },
+    "change": { "allow_unbound_pair": true,
+                "require": [ { "level": "L1", "check": "github_checks", "required_checks": [{ "name": "test", "app": "github-actions" }], "max_age_minutes": 60 },
                              { "level": "L2", "check": "panel_pass", "max_age_minutes": 1440 } ] }
   },
   "budgets": { "daily_usd": { "3.0": 1.0 }, "default_daily_usd": 0.5 },
@@ -54,7 +55,10 @@ Start: `node gate/bin/agent-referee-gate.mjs` (stdio). It needs `agent-referee-c
 }
 ```
 - **Only listed actions exist.** An unknown action is refused, so a hook or agent can't dodge with a new name.
-- **The keys must differ:** the gate won't start if an approval key is also a receipt key.
+- **`required_checks` names each check and the GitHub app that ran it** (`"github-actions"`). A check of the same name from another app doesn't count. An agent that edits the workflow in its own commit so the check always passes is still a risk: protect the workflow files with branch protection, or require an L2 review too.
+- **`task_sha256` on an L2 requirement** (optional) pins the review's brief, so an agent can't get three passes with an easy task. Without it, the done record still keeps the brief's hash (`review_task_sha256`) for anyone to check.
+- **A kind that mixes a commit (L1) and a hash (L0 or L2)** needs `"allow_unbound_pair": true`, set by the owner. No receipt yet proves that the reviewed diff belongs to that commit, so the done record says `pair_bound: false`.
+- **The keys must differ:** the gate won't start if an approval key is also a receipt key, compared as bytes. Each key must be written in its canonical base64 spelling.
 
 ## The approval record part A must produce (`agent-referee-owner-approval-v1`)
 
@@ -74,12 +78,16 @@ It uses today's receipt envelope `{payload, signature, algorithm: "Ed25519", pub
 
 ## Tests
 
-`npm run test:gate` runs 40 tests, each trying to get past one rule:
-- **Approvals:** missing, other action or target, other target_sha256, expired, dated ahead, other policy version, revoked (and still revoked after the revocation is deleted), used up, two processes racing for one use, signed by a forger, a forger's signature with the owner's key in the envelope, signed with Agent Referee's key, edited after signing, unsigned, and a record that can't be read.
-- **Receipts:** another commit or repo, stale or from the future, a required check still running or failed or missing, another run failed, a truncated list, a failed status, the wrong level, a forged signature, edited after signing, an unknown format, reused, two submissions racing, a 2-1, another output, a tally that doesn't recompute, two reviewers from one company, and a real live 2-1 receipt.
-- **The rest:** locks, budgets, a changed policy, shared keys, and the member's name as an argument.
+`npm run test:gate` runs 52 tests, each trying to get past one rule:
+- **Approvals:** missing, other action or target, other target_sha256, expired, dated ahead, a date that doesn't parse, other policy version, revoked (and still revoked after the revocation is deleted), a revocation ignored when the state can't be listed, used up, two processes racing for one use, signed by a forger, a forger's signature with the owner's key in the envelope, signed with Agent Referee's key, edited after signing, unsigned, and a record that can't be read.
+- **Receipts:** another commit or repo, stale or from the future, a required check still running, failed, missing or run by another app, another run failed, a truncated list, a failed or pending status, the wrong level, a forged signature, edited after signing, an unknown format, reused, two submissions racing, a 2-1, another output, another brief, a tally that doesn't recompute, reviewers not from three named companies (unprefixed ids, `claude-*` beside `anthropic/`, case variants), an unbound commit-and-hash pair, and a real live 2-1 receipt.
+- **The rest:** locks, budgets (also across two processes, a crashed holder, and a member named `__proto__`), a changed policy, shared keys in another spelling, and the member's name as an argument.
 
-**Mutants:** 18 were checked (removing one rule each). 17 are caught. The 18th removes a redundant use-count precheck, and the atomic use files still refuse reuse.
+**Mutants:** 31 checked (each removes one rule). 29 are caught. Both survivors remove a second check that another one already covers: the use-count precheck (the atomic use files still refuse reuse), and the canonical key spelling (the byte comparison still refuses a shared key).
+
+**Independent checks so far:**
+- a fresh-agent read of 9318fdd: 10 findings, all fixed in the next commit, each with a test
+- a review-3: planned on the fixed version
 
 ## What the gate can't do alone
 - **It only binds sessions that must go through it.** The Claude Code hooks (part C) and the sandbox (part D) make the owner-only commands and secret paths unreachable except through `check_action`. Without them, the gate is an honest agent's checklist, not a wall.
