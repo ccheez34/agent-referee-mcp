@@ -1,9 +1,10 @@
 // The Agent Referee tools: what each one accepts, what it tells the agent, and what it does.
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { DEFAULT_URL, RefereeError, Seat, sha256Hex, verifyOutcome, verifyReviewOutcome, verifySignature } from "agent-referee-client";
 import { ToolError } from "./protocol.mjs";
 import { validate } from "./validate.mjs";
 import { usd } from "./store.mjs";
+import { proofRequest, checkProof, checksLine, PROOF_FORMAT, NEVER_AN_APPROVAL } from "./proof.mjs";
 
 /** What each paid call costs, in micro-USDC. Also the most a single request may pay, so a price change can never overcharge. */
 export const PRICES = { review: 50_000, "review-3": 200_000, "review-3x2": 600_000, "review-3x3": 700_000 };
@@ -690,6 +691,78 @@ export function createTools({ config, makeClient, makePayingFetch, budget, recei
     };
   }
 
+  // ---------- proof receipts (team members; switched on by AGENT_REFEREE_PROOF) ----------
+  const sha256OfText = (t) => createHash("sha256").update(String(t), "utf8").digest("hex");
+
+  async function proofVerdict(receipt, expect) {
+    const r = await checkProof(receipt, { pinned, expect });
+    const notChecked = [];
+    if (r.level === "L0" && expect.sha256 === undefined) notChecked.push("sha256 (pass the sha256 you hold to confirm the stamp is about it)");
+    if (r.level === "L1" && (expect.repo === undefined || expect.sha === undefined)) notChecked.push("repo and sha (pass the commit you expect)");
+    const what = r.level === "L0" ? `stamp of ${String(r.subject?.sha256 ?? "?").slice(0, 12)}… at ${r.time}` : `${r.check} of ${r.subject?.repo}@${String(r.subject?.sha ?? "?").slice(0, 7)} observed at ${r.time}`;
+    return {
+      summary: `${r.ok ? "Valid" : "NOT valid"} proof receipt (${r.level} ${r.check}): ${what}, member ${r.member ?? "?"}.${r.check === "github_checks" && r.observed ? ` ${checksLine(r.observed)}` : ""}${notChecked.length ? ` Not checked: ${notChecked.map((x) => x.split(" (")[0]).join(" and ")}.` : ""}`,
+      kind: "proof",
+      ...r,
+      not_checked: notChecked,
+      trusts: [
+        ...(r.limits ? [r.limits] : []),
+        "The member name was declared by the caller with the team token, not verified by the service.",
+        r.level === "L0" ? "The claim is the caller's own words, signed as received: Agent Referee didn't check it. What's proven is that this claim and hash reached the service at issued_at from a holder of the team token." : "Agent Referee read these facts from GitHub itself at observed_at. It doesn't say the work is good, or which checks matter.",
+        NEVER_AN_APPROVAL,
+      ],
+    };
+  }
+
+  const proofSchema = {
+    type: "object",
+    required: ["level"],
+    properties: {
+      level: { type: "string", enum: ["L0", "L1"], description: 'L0: a timestamped stamp of a claim and a sha256. L1: a GitHub commit or its checks, read by the service itself. (L2 is a review-3 with three "pass" votes: use sealed_review.)' },
+      check: { type: "string", enum: ["stamp", "github_commit", "github_checks"], description: 'L0: "stamp" (the default). L1: "github_commit" (the commit exists, with its tree, parents and times) or "github_checks" (every check run and status on it).' },
+      sha256: { type: "string", pattern: "^[0-9a-fA-F]{64}$", description: "L0: the full sha256 of what you're stamping, computed by you. The service never sees the thing itself." },
+      text: { type: "string", maxLength: 200000, description: "L0, instead of sha256: text to stamp. Only its sha256 is sent; the text stays here." },
+      claim: { type: "string", maxLength: 500, description: 'L0: a short claim, signed as received and never checked, e.g. "agent-referee-mcp 0.5.0 tarball, tests 74/0".' },
+      repo: { type: "string", maxLength: 140, description: 'L1: a public GitHub repository, "owner/name".' },
+      sha: { type: "string", pattern: "^[0-9a-fA-F]{40}$", description: "L1: the commit's full 40-character sha." },
+    },
+    additionalProperties: false,
+  };
+
+  async function proofReceiptTool(args) {
+    checkArgs(args, proofSchema);
+    const req = proofRequest(args, sha256OfText);
+    if (req.error) throw new ToolError(`${req.error} Nothing was sent.`);
+    const ref = teamClient();
+    if (typeof ref._call !== "function") throw new ToolError("This version of agent-referee-client can't reach the team routes. Update agent-referee-mcp. Nothing was sent.");
+    let r;
+    try {
+      r = await ref._call("POST", "/team/proof", req.body);
+    } catch (e) {
+      throw new ToolError(explainTeam(e));
+    }
+    if (!r?.receipt?.payload) throw new ToolError("The service answered, but no receipt could be read from it. Nothing to show; try again.");
+    const expect = req.body.level === "L0" ? { sha256: req.body.sha256, level: "L0", check: "stamp" } : { repo: req.body.repo, sha: req.body.sha, level: "L1", check: req.body.check };
+    const verdict = await proofVerdict(r.receipt, expect);
+    // The receipt must be the one asked for: this member, this claim.
+    if (verdict.member !== team.member) {
+      verdict.problems.push(`The receipt names member ${verdict.member}, not ${team.member}.`);
+      verdict.ok = false;
+    }
+    if (req.body.level === "L0" && r.receipt.payload.claimed?.text !== req.body.claim) {
+      verdict.problems.push("The receipt's claim differs from the one sent.");
+      verdict.ok = false;
+    }
+    if (!verdict.ok) verdict.summary = verdict.summary.replace(/^Valid/, "NOT valid");
+    let receiptFile = null;
+    try {
+      receiptFile = await receipts.save("proof", verdict.receipt_id, { summary: verdict.summary, level: verdict.level, check: verdict.check, subject: verdict.subject, time: verdict.time, receipt: r.receipt });
+    } catch (e) {
+      verdict.problems.push(`The receipt couldn't be saved (${String(e?.message ?? e).slice(0, 160)}); keep the copy below.`);
+    }
+    return { ...verdict, receipt: r.receipt, receipt_file: receiptFile, what_it_proves: r.what_it_proves ?? null };
+  }
+
   // ---------- verify_receipt: free, offline ----------
   const verifySchema = {
     type: "object",
@@ -710,6 +783,9 @@ export function createTools({ config, makeClient, makePayingFetch, budget, recei
           "Multi-part review (review-3x2, review-3x3), instead of output: every piece you received, [{name?, text}], with the names and in the order given. Multi-part judge match (judge-3x2, judge-3x3): the pieces you hold by seat, {\"seller\": [\"text 1\", \"text 2\"]}. Without them, the check can't confirm the receipt is about the work you have.",
       },
       acks: { type: "array", items: { type: "object" }, description: "Match: the signed step acknowledgments that came with the receipt (optional). Any contradiction between them and the receipt is reported." },
+      sha256: { type: "string", pattern: "^[0-9a-fA-F]{64}$", description: "Proof receipt (L0 stamp): the sha256 you hold, to confirm the stamp is about it." },
+      repo: { type: "string", maxLength: 140, description: 'Proof receipt (L1): the repository you expect, "owner/name".' },
+      sha: { type: "string", pattern: "^[0-9a-fA-F]{40}$", description: "Proof receipt (L1): the full commit sha you expect." },
     },
     additionalProperties: false,
   };
@@ -727,6 +803,8 @@ export function createTools({ config, makeClient, makePayingFetch, budget, recei
     if (receipt && !receipt.payload && receipt.receipt?.payload) receipt = receipt.receipt; // a saved record or a whole response
     if (!receipt?.payload || typeof receipt.payload !== "object") throw new ToolError("That isn't a receipt: it has no payload.");
     const p = receipt.payload;
+
+    if (p.receipt_format === PROOF_FORMAT || p.type === "proof") return proofVerdict(receipt, { sha256: args.sha256, repo: args.repo, sha: args.sha });
 
     const signed = await verifySignature(receipt, pinned).catch(() => false);
     const keyNote = signed
@@ -886,6 +964,18 @@ export function createTools({ config, makeClient, makePayingFetch, budget, recei
       annotations: { title: "List saved receipts", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       handler: savedReceipts,
     },
+    ...(team && config.proof
+      ? [
+          {
+            name: "proof_receipt",
+            title: "Get a proof receipt (a signed timestamp or a GitHub observation)",
+            description: `Team allowance only, no AI model: a signed, timestamped record any agent can check offline with verify_receipt. L0 stamp: this claim and this sha256 existed now, sent by this member (the claim isn't checked; give text instead of sha256 to hash it here without sending it). L1 observe: Agent Referee reads a public GitHub commit (github_commit) or every check run on it (github_checks) itself, and records what it saw and when; a run still in progress is never a pass. Use it as the evidence a "done" carries to a gate. ${NEVER_AN_APPROVAL}`,
+            inputSchema: proofSchema,
+            annotations: { title: "Get a proof receipt", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+            handler: proofReceiptTool,
+          },
+        ]
+      : []),
     ...(team
       ? [
           {

@@ -29,10 +29,14 @@ export function loadConfig(env = process.env) {
   const teamToken = env.AGENT_REFEREE_TEAM_TOKEN?.trim() || undefined;
   if (teamToken && !teamMember) throw new Error("AGENT_REFEREE_TEAM_TOKEN is set but AGENT_REFEREE_TEAM_MEMBER isn't: set the member name too.");
   if (teamMember && !/^[A-Za-z0-9._-]{1,32}$/.test(teamMember)) throw new Error("AGENT_REFEREE_TEAM_MEMBER must be 1 to 32 letters, digits, dots, dashes or underscores.");
+  const proof = (env.AGENT_REFEREE_PROOF ?? "off").trim().toLowerCase();
+  if (!["on", "off"].includes(proof)) throw new Error('AGENT_REFEREE_PROOF must be "on" or "off" (default off).');
+  if (proof === "on" && !teamMember) throw new Error("AGENT_REFEREE_PROOF is on, but proof receipts are for team members: set AGENT_REFEREE_TEAM_MEMBER too.");
   if (teamToken && !/^[\x21-\x7e]{32,512}$/.test(teamToken)) throw new Error("AGENT_REFEREE_TEAM_TOKEN must be 32 or more printable characters with no spaces.");
   return {
     url,
     team: teamMember ? { member: teamMember, token: teamToken } : undefined,
+    proof: proof === "on",
     privateKey: env.AGENT_REFEREE_PRIVATE_KEY?.trim() || undefined,
     dailyLimitMicro: toMicro(limit),
     publicKeys: [REFEREE_KEY, ...extraKeys.filter((k) => k !== REFEREE_KEY)],
