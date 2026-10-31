@@ -635,8 +635,16 @@ export function createTools({ config, makeClient, makePayingFetch, budget, recei
     if (!acksSigned) problems.push("At least one acknowledgment isn't validly signed by the service.");
     const ok = problems.length === 0;
     const out = p.outcome ?? {};
+    // Judge tiers (judge spec §9): the receipt's own signed advisory sentence and human-review marker, read from the
+    // payload so they show with any installed client version, and never a copy kept here.
+    const advisory = typeof p.advisory === "string" && p.advisory.trim() ? p.advisory : undefined;
+    const humanReview = typeof p.human_review === "string" ? p.human_review : undefined;
+    const trusts = [...(res.trusts ?? [])];
+    if (advisory && !trusts.includes(advisory)) trusts.push(advisory);
+    if (humanReview === "required" && !trusts.some((t) => /person's review/.test(t)))
+      trusts.push("The service marks this verdict for a person's review (human_review: required). Don't act on it in a step that can't be undone until someone has reviewed it.");
     return {
-      summary: `${ok ? "Valid" : "NOT valid"} ${p.demo ? "DEMO " : ""}${p.tier} match receipt: ${out.picked_option !== undefined ? `picked "${out.picked_option}"` : `winner ${out.winner ?? "none"}`}${out.mistrial ? " (mistrial)" : ""}.${res.recomputed ? " The result was recomputed from the agents' own commitments and reveals." : ""}`,
+      summary: `${ok ? "Valid" : "NOT valid"} ${p.demo ? "DEMO " : ""}${p.tier} match receipt: ${out.picked_option !== undefined ? `picked "${out.picked_option}"` : `winner ${out.winner ?? "none"}`}${out.mistrial ? " (mistrial)" : ""}.${res.recomputed ? " The result was recomputed from the agents' own commitments and reveals." : ""}${humanReview === "required" ? " The verdict is advice: a person should review it before anyone acts on it (see advisory)." : ""}`,
       kind: "match",
       ok,
       demo: p.demo === true,
@@ -647,7 +655,9 @@ export function createTools({ config, makeClient, makePayingFetch, budget, recei
       outcome: out,
       recomputed: res.recomputed,
       problems,
-      trusts: res.trusts,
+      trusts,
+      ...(advisory ? { advisory } : {}),
+      ...(humanReview ? { human_review: humanReview } : {}),
       evidence: res.evidence?.length ? res.evidence : undefined,
       signature: keyNote,
       ...(p.demo ? { demo_note: "This is a free demo receipt. It's marked demo inside the signed part and is not a paid result." } : {}),

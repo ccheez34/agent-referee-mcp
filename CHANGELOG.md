@@ -1,5 +1,9 @@
 # Changelog
 
+
+## Unreleased: judge tiers without Claude (judge spec §9)
+- **verify_receipt** shows a judge receipt's own signed `advisory` sentence and `human_review` ("required"), adds both to `trusts`, and says in its summary that a person should review the verdict. They're read from the receipt itself, so they show with any installed client version.
+- **test/fixtures/multi-judge-vectors.json** is the server's regenerated file (agent-referee-server `735a531`; unchanged at `df1ca4f`): no Claude judge, both fields on every case. `test/advisory.test.mjs` runs them through verify_receipt.
 ## 0.5.0 (unreleased)
 
 - **Team mode, for the operator's own sessions.** With `AGENT_REFEREE_TEAM_MEMBER` set (and
