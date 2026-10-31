@@ -56,6 +56,20 @@ export function subjectOf(msg) {
   return undefined;
 }
 
+/** ChatGPT's coarse location hint ("openai/userLocation"), reduced to a two-letter country code, or undefined.
+ *  Off unless the operator sets LOCATION_HINTS to "on" (after the lawyer's answer on PLAN 0.5). OpenAI calls it a hint
+ *  that servers must never rely on for authorization: it's a best-effort filter, not a check. Only the country is
+ *  ever read; the city, region and coordinates are ignored and never stored or sent on. */
+export function countryHintOf(msg, env) {
+  if (String(env?.LOCATION_HINTS ?? "").toLowerCase() !== "on") return undefined;
+  const calls = (Array.isArray(msg) ? msg : [msg]).filter((m) => m && typeof m === "object");
+  for (const m of calls) {
+    const c = m.params?._meta?.["openai/userLocation"]?.country;
+    if (typeof c === "string" && /^[A-Za-z]{2}$/.test(c.trim())) return c.trim().toUpperCase();
+  }
+  return undefined;
+}
+
 export default {
   async fetch(req, env) {
     const url = new URL(req.url);
@@ -105,7 +119,7 @@ export default {
     const server = createMcpServer({
       info: { name: "agent-referee", title: "Agent Referee", version: VERSION },
       instructions: INSTRUCTIONS,
-      tools: buildTools({ env, subject: subjectOf(msg) }),
+      tools: buildTools({ env, subject: subjectOf(msg), countryHint: countryHintOf(msg, env) }),
       write: (line) => out.push(line),
       // Only the first line, cut short: protocol.mjs logs an error's stack, never a request's content.
       log: (m) => console.error(String(m).split("\n")[0].slice(0, 200)),

@@ -78,8 +78,9 @@ function present(job) {
   return { summary: "The review is still running.", ...base, next: "Call get_review again with the same job_id. Reviews usually take 10-90 seconds, sometimes up to about 5 minutes." };
 }
 
-/** @param {{ env: any, subject?: string }} deps  subject: ChatGPT's anonymous id for the person, when it sent one. */
-export function buildTools({ env, subject }) {
+/** @param {{ env: any, subject?: string, countryHint?: string }} deps  subject: ChatGPT's anonymous id for the person,
+ *  when it sent one. countryHint: the country from ChatGPT's location hint, only when LOCATION_HINTS is on. */
+export function buildTools({ env, subject, countryHint }) {
   const waitStart = Number(env.START_WAIT_MS ?? 20_000);
   const waitPoll = Number(env.POLL_WAIT_MS ?? 40_000);
   const job = (id) => env.JOBS.get(env.JOBS.idFromName(id));
@@ -105,7 +106,7 @@ export function buildTools({ env, subject }) {
         if (!env.INTERNAL_TOKEN) throw new ToolError("This server isn't connected to Agent Referee yet (an operator setting). Nothing was used.");
         const id = randomHex(16);
         const tier = args.tier ?? "review";
-        const r = await job(id).fetch("https://job/start", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id, tier, ...args, subject: subject ?? null }) });
+        const r = await job(id).fetch("https://job/start", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id, tier, ...args, subject: subject ?? null, country_hint: countryHint ?? null }) });
         if (!r.ok) throw new ToolError("The review couldn't be started. Try again.");
         if (waitStart > 0) {
           const now = await job(id).fetch(`https://job/status?wait=${Math.min(waitStart, 40_000)}`, { headers: subject ? { "x-subject": subject } : {} });
