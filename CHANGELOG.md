@@ -1,5 +1,10 @@
 # Changelog
 
+
+## Unreleased (on team-mode): long reviews come back through a 60-second link
+- **`sealed_review` waits at most `wait_seconds` (default 45)**, then returns `status: "running"` and a `job_id`; the review carries on in this server, its receipt is saved, and the new **`review_result`** tool returns it. Reported Oct 30 (5.0-D95): a `review-3` through a link that gives up after 60 seconds finished and was charged, but its answer never arrived and nothing was saved.
+- **A pending record is saved before anything is sent** (`pending-<job_id>.json`: tier, time, task and output fingerprints, no text), marked `done` with the `review_id` when the receipt lands, or `failed` with the error.
+- Tests: `test/slow-review.test.mjs` (5); the e2e and team tests know the new tool and record. 67 of 67 against the server's main `df1ca4f`.
 ## Unreleased
 
 - **Team mode, for the operator's own sessions.** With `AGENT_REFEREE_TEAM_MEMBER` set (and

@@ -25,7 +25,7 @@ test("stdio: handshake, the five tools, and stdout carries nothing but JSON-RPC"
   assert.match(init.result.instructions, /tiebreak/);
   const list = await s.request("tools/list");
   const names = list.result.tools.map((t) => t.name);
-  assert.deepEqual(names, ["demo_match", "tiebreak", "sealed_review", "verify_receipt", "saved_receipts"]);
+  assert.deepEqual(names, ["demo_match", "tiebreak", "sealed_review", "review_result", "verify_receipt", "saved_receipts"]);
   for (const t of list.result.tools) {
     assert.equal(t.inputSchema.type, "object", t.name);
     assert.ok(t.description.length > 80, `${t.name} explains itself`);
@@ -238,8 +238,13 @@ test("sealed_review: pays once, returns a checked verdict, saves the receipt, co
   assert.equal((await c.call("verify_receipt", { receipt: saved, task, output: "22.2" })).data.ok, true);
 
   const listed = await c.call("saved_receipts", {});
-  assert.equal(listed.data.receipts.length, 1);
-  assert.equal(listed.data.receipts[0].id, d.review_id);
+  assert.equal(listed.data.receipts.filter((x) => x.kind === "review").length, 1);
+  assert.equal(listed.data.receipts.filter((x) => x.kind === "pending").length, 1, "and the pending record saved before sending, now marked done");
+  assert.equal(listed.data.receipts.find((x) => x.kind === "review").id, d.review_id);
+  assert.equal(d.status, "done", "a quick review comes back in the same call");
+  const pending = await c.call("saved_receipts", { id: d.job_id });
+  assert.equal(pending.data.status, "done");
+  assert.equal(pending.data.review_id, d.review_id, "the pending record points to the receipt");
   assert.equal((await c.call("saved_receipts", { id: d.review_id })).data.receipt.signature, d.receipt.signature);
 });
 
@@ -296,10 +301,10 @@ test("sealed_review: if the client gives up mid-review, the review still finishe
     let list;
     for (let i = 0; i < 100; i++) {
       list = (await c.call("saved_receipts", {})).data;
-      if (list.receipts.length) break;
+      if (list.receipts.some((x) => x.kind === "review")) break;
       await new Promise((r) => setTimeout(r, 20));
     }
-    assert.equal(list.receipts.length, 1, "the receipt was saved even though nobody was waiting for it");
+    assert.equal(list.receipts.filter((x) => x.kind === "review").length, 1, "the receipt was saved even though nobody was waiting for it");
     assert.match(list.spent_today, /^\$0\.05/, "and the spend was counted");
     assert.equal(c.out.filter((m) => m.id === id).length, 0, "the cancelled call got no response");
   } finally {

@@ -115,7 +115,7 @@ test("stdio: team mode lists team_allowance and says so at startup, never printi
   const s = spawnServer(await envFor({ AGENT_REFEREE_TEAM_MEMBER: "3.0", AGENT_REFEREE_TEAM_TOKEN: TOKEN }));
   await s.init();
   const names = (await s.request("tools/list")).result.tools.map((t) => t.name);
-  assert.deepEqual(names, ["demo_match", "tiebreak", "sealed_review", "verify_receipt", "saved_receipts", "team_allowance"]);
+  assert.deepEqual(names, ["demo_match", "tiebreak", "sealed_review", "review_result", "verify_receipt", "saved_receipts", "team_allowance"]);
   const a = await s.call("team_allowance", {});
   assert.equal(a.isError, false, a.text);
   assert.equal(a.structured.team.member, "3.0");

@@ -1,5 +1,6 @@
 // The Agent Referee tools: what each one accepts, what it tells the agent, and what it does.
-import { DEFAULT_URL, RefereeError, Seat, verifyOutcome, verifyReviewOutcome, verifySignature } from "agent-referee-client";
+import { randomBytes } from "node:crypto";
+import { DEFAULT_URL, RefereeError, Seat, sha256Hex, verifyOutcome, verifyReviewOutcome, verifySignature } from "agent-referee-client";
 import { ToolError } from "./protocol.mjs";
 import { validate } from "./validate.mjs";
 import { usd } from "./store.mjs";
@@ -336,6 +337,13 @@ export function createTools({ config, makeClient, makePayingFetch, budget, recei
         description: 'Optional weighted criteria, e.g. [{"name": "accuracy", "weight": 3}]. Each reviewer scores 0-10 per criterion.',
       },
       panel: panelSchema,
+      wait_seconds: {
+        type: "integer",
+        minimum: 0,
+        maximum: 300,
+        description:
+          "How long this call waits for the result (default 45). A review-3 can take a few minutes; if it isn't done by then, this call returns status \"running\" and a job_id, the review carries on, and review_result returns it (the receipt is saved to disk either way). Keep it under 60 when the call goes through a link that gives up after 60 seconds.",
+      },
       free: {
         type: "boolean",
         description:
@@ -404,8 +412,107 @@ export function createTools({ config, makeClient, makePayingFetch, budget, recei
     return { ...r, check };
   }
 
+  // ---------- jobs: a review runs on even when the call that started it returns ----------
+  // A tool call that goes through a link with a time limit (60 s from a cloud session to this PC) would otherwise lose
+  // a review that takes longer: the service finishes and charges it, but the answer never arrives. So sealed_review
+  // waits at most wait_seconds, then returns a job_id; the review carries on here, saves its receipt, and
+  // review_result returns it. A "pending" record is saved before anything is sent, so even a server that's killed
+  // mid-review leaves a trace in saved_receipts.
+  const DEFAULT_WAIT_S = 45;
+  const jobs = new Map();
+  const newJobId = () => `job_${Date.now().toString(36)}_${randomBytes(5).toString("hex")}`;
+
+  async function savePending(job, args, extra = {}) {
+    try {
+      await receipts.save("pending", job.id, {
+        summary: `${job.tier} ${job.status}${args.title ? ` — ${args.title}` : ""}`,
+        job_id: job.id,
+        status: job.status,
+        tier: job.tier,
+        title: args.title ?? null,
+        started_at: job.started_at,
+        task_sha256: await sha256Hex(args.task),
+        ...(args.output !== undefined ? { output_sha256: await sha256Hex(args.output) } : {}),
+        ...(args.pieces ? { pieces_sha256: await Promise.all(args.pieces.map((pc) => sha256Hex(pc.text))) } : {}),
+        note: "Saved before the review was sent. If status is still \"running\" and no review receipt followed, the server stopped mid-review: the review may have finished and been charged without its answer arriving.",
+        ...extra,
+      });
+    } catch {}
+  }
+
+  /** Waits up to `seconds` for the job; returns its result, throws its error, or says it's still running. */
+  async function awaitJob(job, seconds) {
+    if (job.status === "running" && seconds > 0) {
+      let timer;
+      await Promise.race([job.settled, new Promise((r) => (timer = setTimeout(r, seconds * 1000)))]);
+      clearTimeout(timer);
+    }
+    if (job.status === "done") return { job_id: job.id, status: "done", ...job.result };
+    if (job.status === "failed") {
+      if (job.error instanceof ToolError) throw job.error;
+      throw new ToolError(String(job.error?.message ?? job.error));
+    }
+    return {
+      summary: `The ${job.tier} review is still running (started ${job.started_at}). Call review_result with job_id "${job.id}" in a little while; nothing more is charged. The receipt is saved to disk when it finishes.`,
+      job_id: job.id,
+      status: "running",
+      tier: job.tier,
+      started_at: job.started_at,
+    };
+  }
+
   async function sealedReview(args, { progress }) {
     checkArgs(args, reviewSchema);
+    const job = { id: newJobId(), status: "running", tier: args.tier ?? "review", started_at: new Date().toISOString() };
+    let live = true; // progress notifications only while the call that started the review is still open
+    const say = (m) => {
+      if (live) progress(m);
+    };
+    job.settled = runReview(args, say, async () => {
+      job.sent = true;
+      await savePending(job, args);
+    }).then(
+      async (result) => {
+        job.status = "done";
+        job.result = result;
+        await savePending(job, args, { review_id: result.review_id, receipt_file: result.receipt_file ?? null });
+      },
+      async (e) => {
+        job.status = "failed";
+        job.error = e;
+        if (job.sent) await savePending(job, args, { error: String(e?.message ?? e).slice(0, 500) });
+      },
+    );
+    jobs.set(job.id, job);
+    try {
+      return await awaitJob(job, args.wait_seconds ?? DEFAULT_WAIT_S);
+    } finally {
+      live = false;
+    }
+  }
+
+  const resultSchema = {
+    type: "object",
+    required: ["job_id"],
+    properties: {
+      job_id: { type: "string", pattern: "^job_[a-z0-9]+_[0-9a-f]{10}$", description: "The job_id sealed_review returned." },
+      wait_seconds: { type: "integer", minimum: 0, maximum: 300, description: "How long to wait for it to finish (default 45; keep it under 60 through a link that gives up after 60 seconds)." },
+    },
+    additionalProperties: false,
+  };
+
+  async function reviewResultTool(args) {
+    checkArgs(args, resultSchema);
+    const job = jobs.get(args.job_id);
+    if (!job) {
+      const saved = await receipts.get(args.job_id).catch(() => null);
+      if (saved) return { summary: `This server has restarted since that review; its saved record is below.${saved.review_id ? ` The receipt is saved as review ${saved.review_id} (saved_receipts).` : ""}`, ...saved };
+      throw new ToolError(`No review job ${args.job_id} on this server (it may have restarted). Check saved_receipts.`);
+    }
+    return awaitJob(job, args.wait_seconds ?? DEFAULT_WAIT_S);
+  }
+
+  async function runReview(args, progress, beforeSend) {
     if (args.task.trim().length < 10) throw new ToolError("task must be at least 10 characters of actual text.");
     const tier = args.tier ?? "review";
     const n = MULTI_PIECES[tier];
@@ -430,6 +537,7 @@ export function createTools({ config, makeClient, makePayingFetch, budget, recei
     if (args.criteria && new Set(args.criteria.map((c) => c.name.trim())).size !== args.criteria.length) throw new ToolError("criteria names must be unique.");
     if (args.criteria?.some((c) => !c.name.trim() || /[\n\r]/.test(c.name))) throw new ToolError("Each criteria name must be text on one line. Nothing was charged.");
     const price = PRICES[tier];
+    await beforeSend(); // the "pending" record, saved before anything is sent
 
     if (!n && args.free === true) return reviewResult(args, tier, await freeReview(args, tier, progress), null, []);
     if (team) return reviewResult(args, tier, await teamReview(args, tier, n, progress), null, [], true);
@@ -713,10 +821,19 @@ export function createTools({ config, makeClient, makePayingFetch, budget, recei
       name: "sealed_review",
       title: "Sealed review of your own output (free daily allowance, then paid)",
       description:
-        "FREE OR PAID. Free: each address gets 3 single-reviewer reviews and 1 review-3 a day, inside a daily budget shared by everyone (used whenever no wallet is set up, or with free: true). Paid: $0.05, or $0.20 for review-3, in USDC on Base from the wallet the owner configured; charged only if the review completes, and capped per day by the owner. Multi-part (paid only, $0.60 for review-3x2, $0.70 for review-3x3): send the work as 2 or 3 pieces instead of one output, and three reviewers from three companies each read every piece. Team allowance: when the owner has set one up (AGENT_REFEREE_TEAM_MEMBER), reviews are paid from it instead of the wallet, at the same prices; check what's left with team_allowance. Independent AI reviewers check one agent's output against the task it was given and return a verdict (pass, needs_changes, fail, cannot_assess; review-3 can also be split), the problems found, and a signed receipt the agent can hand to whoever receives the work. Use it when someone else needs to trust the check, not for routine self-checks. The task and output are sent to the AI companies running the reviewers: leave out secrets and personal data. Can take up to a few minutes. The receipt is saved to disk automatically.",
+        "FREE OR PAID. Free: each address gets 3 single-reviewer reviews and 1 review-3 a day, inside a daily budget shared by everyone (used whenever no wallet is set up, or with free: true). Paid: $0.05, or $0.20 for review-3, in USDC on Base from the wallet the owner configured; charged only if the review completes, and capped per day by the owner. Multi-part (paid only, $0.60 for review-3x2, $0.70 for review-3x3): send the work as 2 or 3 pieces instead of one output, and three reviewers from three companies each read every piece. Team allowance: when the owner has set one up (AGENT_REFEREE_TEAM_MEMBER), reviews are paid from it instead of the wallet, at the same prices; check what's left with team_allowance. Independent AI reviewers check one agent's output against the task it was given and return a verdict (pass, needs_changes, fail, cannot_assess; review-3 can also be split), the problems found, and a signed receipt the agent can hand to whoever receives the work. Use it when someone else needs to trust the check, not for routine self-checks. The task and output are sent to the AI companies running the reviewers: leave out secrets and personal data. Can take a few minutes: the call waits up to wait_seconds (default 45), then returns status \"running\" and a job_id while the review carries on; get it with review_result. The receipt is saved to disk automatically either way.",
       inputSchema: reviewSchema,
       annotations: { title: "Sealed review", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
       handler: sealedReview,
+    },
+    {
+      name: "review_result",
+      title: "Get a sealed review that was still running",
+      description:
+        "Free and local: returns the result of a sealed_review that was still running when its call returned (status \"running\" and a job_id). Waits up to wait_seconds (default 45) for it to finish; if it still isn't done, call again. Nothing more is charged.",
+      inputSchema: resultSchema,
+      annotations: { title: "Get a running review's result", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      handler: reviewResultTool,
     },
     {
       name: "verify_receipt",
