@@ -13,7 +13,9 @@
   "vars": {
     "REFEREE_URL": "https://agentreferee.ai",
     // "true" stops new reviews (start_review answers that it's paused); get_review and verify_receipt keep working.
-    "REMOTE_PAUSED": "false"
+    "REMOTE_PAUSED": "false",
+    // ChatGPT's location hint (country only) passed to the service: "on" only after the lawyer's answer (PLAN 0.5).
+    "LOCATION_HINTS": "off"
   },
   "observability": { "enabled": true },
 
@@ -30,6 +32,7 @@
       "vars": {
         "REFEREE_URL": "https://agent-referee-staging.fairplayclub.workers.dev",
         "REMOTE_PAUSED": "false",
+        "LOCATION_HINTS": "off",
         // Staging signs receipts with its own key (key ID 56906115c6857d27, from the staging /pubkey page).
         "EXTRA_PUBLIC_KEYS": "HQxMeqRdQ3ARUm/WAhdIRWyp8HE/QJf6yHb+lwFxeUg="
       }

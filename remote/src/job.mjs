@@ -54,6 +54,7 @@ export class ReviewJob {
       // storage-only, so no other request can run between them (Durable Object input gates).
       const b = await req.json().catch(() => null);
       if (!b || typeof b.id !== "string" || !TIERS.includes(b.tier) || typeof b.task !== "string" || typeof b.output !== "string") return json(400, { error: "Bad job request." });
+      if (b.country_hint != null && !/^[A-Z]{2}$/.test(b.country_hint)) return json(400, { error: "Bad job request." });
       if (!this.env.INTERNAL_TOKEN) return json(503, { error: "Not connected to Agent Referee." }); // the hashes need the key
       // Only keyed hashes of the person's id are kept: one to check who reads the result, one sent as the caller.
       const owner = b.subject ? await ownerFor(this.env, b.subject) : null;
@@ -64,7 +65,7 @@ export class ReviewJob {
       // review has been sent and checked.
       await st.put({
         job: { id: b.id, status: "queued", tier: b.tier, created, expires: created + KEEP_MS, owner },
-        input: { task: b.task, output: b.output, title: b.title, criteria: b.criteria, panel: b.panel, caller },
+        input: { task: b.task, output: b.output, title: b.title, criteria: b.criteria, panel: b.panel, caller, ...(b.country_hint ? { country_hint: b.country_hint } : {}) },
       });
       await st.setAlarm(created);
       return json(200, { ok: true });
@@ -163,6 +164,9 @@ export class ReviewJob {
           "content-type": "application/json",
           "x-internal-auth": env.INTERNAL_TOKEN ?? "",
           ...(input.caller ? { "x-caller-id": `chatgpt:${input.caller}` } : {}),
+          // ChatGPT's location hint, only the country, only with LOCATION_HINTS on: the service may apply its region
+          // rules to it as a best-effort filter (a hint, never proof of where the person is).
+          ...(input.country_hint ? { "x-caller-country-hint": input.country_hint } : {}),
         },
         body,
         signal: AbortSignal.timeout(REVIEW_TIMEOUT_MS),

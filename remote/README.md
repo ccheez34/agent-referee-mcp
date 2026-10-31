@@ -27,6 +27,7 @@ The reviews are free to the person. They run on Agent Referee's internal route (
 - **Result:** the verdict, votes and receipt are kept for 24 hours so `get_review` can return them, then deleted.
 - **Your id:** ChatGPT's id for the person is stored only as a hash (to make sure the same person reads the result). Agent Referee stores it only as a daily-salted hash.
 - **Nothing kept by Agent Referee:** it keeps no copy of the review.
+- **Location (off today):** ChatGPT sends a coarse location hint with each tool call (`openai/userLocation`). This server ignores it unless the operator sets `LOCATION_HINTS` to `"on"`. Then it reads **only the country** and passes it to Agent Referee as `x-caller-country-hint`, for its region rules. The city, region and coordinates are never read, stored or sent on. OpenAI calls it a hint, not proof of where someone is, so it's a best-effort filter only.
 
 ## Deploy (operator)
 

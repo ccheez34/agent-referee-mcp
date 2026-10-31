@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { canonicalJson, sha256Hex } from "agent-referee-client";
-import worker, { ReviewJob, subjectOf } from "../src/worker.mjs";
+import worker, { ReviewJob, subjectOf, countryHintOf } from "../src/worker.mjs";
 import { callerIdFor } from "../src/job.mjs";
 
 const b64 = (b) => Buffer.from(b).toString("base64");
@@ -263,6 +263,30 @@ test("subjectOf reads ChatGPT's anonymous id only when it's a plain short string
   assert.equal(subjectOf({ params: { _meta: { "openai/subject": "tab\there" } } }), undefined);
   assert.equal(subjectOf({ params: { _meta: { "openai/subject": "a".repeat(201) } } }), undefined);
   assert.equal(subjectOf(null), undefined);
+});
+
+test("ChatGPT's location hint: off by default; with LOCATION_HINTS on, only a two-letter country is sent on, never the city or coordinates", async () => {
+  const loc = { city: "Springfield", region: "Somewhere", country: "us", timezone: "America/Chicago", latitude: 1.5, longitude: 2.5 };
+  const meta = (l) => ({ name: "start_review", arguments: work, _meta: { "openai/subject": "user-9", "openai/userLocation": l } });
+  // Off by default: nothing is read or sent.
+  const off = makeEnv();
+  await rpc(off, "tools/call", meta(loc));
+  assert.equal(off.REFEREE.calls[0].headers["x-caller-country-hint"], undefined);
+  // On: the country only.
+  const on = makeEnv({ LOCATION_HINTS: "on" });
+  await rpc(on, "tools/call", meta(loc));
+  const sent = on.REFEREE.calls[0];
+  assert.equal(sent.headers["x-caller-country-hint"], "US");
+  const everything = JSON.stringify(sent) + JSON.stringify([...[...on.JOBS.objs.values()][0].data.values()]);
+  for (const x of ["Springfield", "Somewhere", "America/Chicago", "1.5", "2.5"]) assert.ok(!everything.includes(x), `${x} is never sent or stored`);
+  // Missing or odd values are treated as no hint.
+  for (const l of [undefined, {}, { country: "USA" }, { country: 7 }, { country: "u1" }]) {
+    const e = makeEnv({ LOCATION_HINTS: "on" });
+    await rpc(e, "tools/call", meta(l));
+    assert.equal(e.REFEREE.calls[0].headers["x-caller-country-hint"], undefined, JSON.stringify(l));
+  }
+  assert.equal(countryHintOf({ params: { _meta: { "openai/userLocation": { country: " de " } } } }, { LOCATION_HINTS: "ON" }), "DE");
+  assert.equal(countryHintOf({ params: { _meta: { "openai/userLocation": { country: "DE" } } } }, {}), undefined);
 });
 
 test("the shown verdict comes from the signed receipt, not the rest of the answer; expired jobs can't be read", async () => {
