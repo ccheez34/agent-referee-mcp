@@ -477,3 +477,47 @@ test("one reviewer from an unnamed company with two named ones isn't three named
   const r = await g.call("submit_done", { kind: "reviewed", subject: { sha256: DIFF_SHA256 }, receipts: [reviewReceipt({ models: ["gpt-6-luna", "anthropic/claude-x", "google/gemini"] })] });
   assert.equal(r.accepted, false);
 });
+
+// ---------------- after the review-3x3 of 7f47b61 (receipt 8006457af2764575bb723d52) ----------------
+
+test("R1 (Luna): an empty company prefix or a non-hyphenated claude id isn't a named company", async () => {
+  const g = await gate();
+  for (const models of [["/model", "openai/gpt-6-luna", "google/gemini"], ["claudette", "openai/gpt-6-luna", "google/gemini"], ["claude-opus-5-5", "openai/gpt-6-luna", "go*gle/x"]])
+    assert.equal((await g.call("submit_done", { kind: "reviewed", subject: { sha256: DIFF_SHA256 }, receipts: [reviewReceipt({ models })] })).accepted, false, models.join(","));
+});
+
+test("R2 (Sonnet): the refusal names no person; pair_bound appears only when a commit and a hash were both submitted", async () => {
+  const g = await gate();
+  assert.doesNotMatch((await g.call("check_action", DEPLOY)).summary, /ccheez34/);
+  const policy = pinnedPolicy({ done: { solo: { allow_unbound_pair: true, require: [{ level: "L2", check: "panel_pass", max_age_minutes: 1440 }] } } });
+  const g2 = await gate({ policy });
+  const r = await g2.call("submit_done", { kind: "solo", subject: { sha256: DIFF_SHA256 }, receipts: [reviewReceipt()] });
+  assert.equal(r.accepted, true);
+  assert.equal("pair_bound" in r, false);
+});
+
+test("R3 (Sonnet): the order of receipts doesn't matter, and one receipt sent twice can't meet two requirements", async () => {
+  const policy = pinnedPolicy({
+    done: {
+      two: {
+        require: [
+          { level: "L1", check: "github_checks", required_checks: [{ name: "test", app: "github-actions" }], max_age_minutes: 60 },
+          { level: "L1", check: "github_checks", required_checks: [{ name: "test", app: "github-actions" }, { name: "lint", app: "github-actions" }], max_age_minutes: 60 },
+        ],
+      },
+    },
+  });
+  const both = [
+    { name: "test", app: "github-actions", status: "completed", conclusion: "success", completed_at: iso(NOW) },
+    { name: "lint", app: "github-actions", status: "completed", conclusion: "success", completed_at: iso(NOW) },
+  ];
+  const g = await gate({ policy });
+  // A greedy match would give the first requirement the receipt with both checks, leaving none for the second.
+  const r = await g.call("submit_done", { kind: "two", subject: commit, receipts: [checksReceipt({ runs: both }), checksReceipt()] });
+  assert.equal(r.accepted, true, JSON.stringify(r));
+  const g2 = await gate({ policy });
+  const same = checksReceipt({ runs: both });
+  const twice = await g2.call("submit_done", { kind: "two", subject: commit, receipts: [same, same] });
+  assert.equal(twice.accepted, false);
+  assert.match(JSON.stringify(twice.unmet), /one receipt meets one requirement/);
+});

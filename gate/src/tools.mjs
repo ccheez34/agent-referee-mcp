@@ -86,7 +86,7 @@ export function createGateTools({ policy, state, member, approvalsSource, now = 
       allowed: false,
       owner_only: true,
       reasons: reasons.slice(0, 20),
-      summary: `Not allowed: "${req.action}" is owner-only and no approval from the owner fits this exact target${reasons.length ? ` (${reasons[0]})` : ""}. Ask ccheez34; only his signed approval opens it.`,
+      summary: `Not allowed: "${req.action}" is owner-only and no approval from the owner fits this exact target${reasons.length ? ` (${reasons[0]})` : ""}. Ask the owner; only an approval signed with the owner's key opens it.`,
     };
   }
 
@@ -111,37 +111,49 @@ export function createGateTools({ policy, state, member, approvalsSource, now = 
     if (ns.error) throw new ToolError(ns.error);
     const subject = ns.subject;
     const t = now();
-    const matched = [];
-    const unmet = [];
-    const taken = new Set();
+    // Which receipts could meet which requirement (each checked once), then a matching that gives every requirement
+    // a different receipt with a different id: a receipt sent twice can't count twice, and the order doesn't matter.
+    const fits = [];
+    const whys = [];
     for (const req of rule.require) {
+      const ok = [];
       const why = [];
-      let hit = null;
       for (let i = 0; i < args.receipts.length; i++) {
-        if (taken.has(i)) continue;
         const problem = await receiptProblem(args.receipts[i], req, subject, { receiptKeys: policy.receipt_keys, now: t, skewMs });
         if (problem) {
           why.push(`receipt ${i + 1}: ${problem}`);
           continue;
         }
         const id = receiptId(args.receipts[i]);
-        if (!id) {
-          why.push(`receipt ${i + 1}: it has no id`);
-          continue;
-        }
-        if (await state.exists(`accepted-${id}`)) {
-          why.push(`receipt ${i + 1}: this gate already accepted it once`);
-          continue;
-        }
-        hit = { i, id };
-        break;
+        if (!id) why.push(`receipt ${i + 1}: it has no id`);
+        else if (await state.exists(`accepted-${id}`)) why.push(`receipt ${i + 1}: this gate already accepted it once`);
+        else ok.push({ i, id });
       }
-      const label = `${req.level} ${req.check ?? "panel_pass"}`;
-      if (hit) {
-        taken.add(hit.i);
-        matched.push({ requirement: label, receipt: hit.i + 1, id: hit.id });
-      } else unmet.push({ requirement: label, why: why.slice(0, 5) });
+      fits.push(ok);
+      whys.push(why);
     }
+    const owner = new Map(); // receipt id -> requirement index
+    const assign = (r, seen) => {
+      for (const c of fits[r]) {
+        if (seen.has(c.id)) continue;
+        seen.add(c.id);
+        if (!owner.has(c.id) || assign(owner.get(c.id).r, seen)) {
+          owner.set(c.id, { r, c });
+          return true;
+        }
+      }
+      return false;
+    };
+    rule.require.forEach((_, r) => assign(r, new Set()));
+    const byReq = new Map([...owner.values()].map(({ r, c }) => [r, c]));
+    const matched = [];
+    const unmet = [];
+    rule.require.forEach((req, r) => {
+      const label = `${req.level} ${req.check ?? "panel_pass"}`;
+      const c = byReq.get(r);
+      if (c) matched.push({ requirement: label, receipt: c.i + 1, id: c.id });
+      else unmet.push({ requirement: label, why: (whys[r].length ? whys[r] : ["every receipt that fits is needed by another requirement (one receipt meets one requirement)"]).slice(0, 5) });
+    });
     if (unmet.length) {
       await state.log({ tool: "submit_done", member, kind: args.kind, subject, accepted: false, unmet: unmet.map((u) => u.requirement) });
       return { accepted: false, kind: args.kind, subject, member, unmet, summary: `Not accepted: ${unmet.length} of ${rule.require.length} requirement(s) unmet (${unmet.map((u) => u.requirement).join(", ")}). The done stays open.` };
@@ -162,7 +174,7 @@ export function createGateTools({ policy, state, member, approvalsSource, now = 
       subject,
       receipts: matched.map((m) => m.id),
       ...(matched.some((m) => review(m.receipt - 1)) ? { review_task_sha256: matched.map((m) => review(m.receipt - 1)).filter(Boolean) } : {}),
-      ...(rule.allow_unbound_pair ? { pair_bound: false } : {}),
+      ...(subject.sha256 && subject.repo && rule.allow_unbound_pair ? { pair_bound: false } : {}),
       note: args.note ?? null,
       at: new Date(t).toISOString(),
     };

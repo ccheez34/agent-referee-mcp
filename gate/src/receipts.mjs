@@ -15,9 +15,14 @@ const PASSING = new Set(["success"]);
 
 // As the client's companyOfModel, but case-insensitive: the prefix before "/", "claude-*" is Anthropic, and every other
 // unprefixed id counts as one group ("other"), so unprefixed ids can't pose as three companies.
+// A prefix must be a real name (letters, digits, hyphens); "/model" or "claudette" are not companies.
 const companyOf = (m) => {
   const id = String(m).toLowerCase();
-  return id.includes("/") ? id.split("/")[0] : id.startsWith("claude") ? "anthropic" : "other";
+  if (id.includes("/")) {
+    const prefix = id.split("/")[0];
+    return /^[a-z0-9][a-z0-9-]*$/.test(prefix) ? prefix : "other";
+  }
+  return id.startsWith("claude-") ? "anthropic" : "other";
 };
 
 /** Normalizes the subject the caller says it's submitting (spec §4). Returns { subject } or { error }. */

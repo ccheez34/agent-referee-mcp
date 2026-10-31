@@ -78,16 +78,21 @@ It uses today's receipt envelope `{payload, signature, algorithm: "Ed25519", pub
 
 ## Tests
 
-`npm run test:gate` runs 52 tests, each trying to get past one rule:
+`npm run test:gate` runs 55 tests, each trying to get past one rule:
 - **Approvals:** missing, other action or target, other target_sha256, expired, dated ahead, a date that doesn't parse, other policy version, revoked (and still revoked after the revocation is deleted), a revocation ignored when the state can't be listed, used up, two processes racing for one use, signed by a forger, a forger's signature with the owner's key in the envelope, signed with Agent Referee's key, edited after signing, unsigned, and a record that can't be read.
-- **Receipts:** another commit or repo, stale or from the future, a required check still running, failed, missing or run by another app, another run failed, a truncated list, a failed or pending status, the wrong level, a forged signature, edited after signing, an unknown format, reused, two submissions racing, a 2-1, another output, another brief, a tally that doesn't recompute, reviewers not from three named companies (unprefixed ids, `claude-*` beside `anthropic/`, case variants), an unbound commit-and-hash pair, and a real live 2-1 receipt.
+- **Receipts:** another commit or repo, stale or from the future, a required check still running, failed, missing or run by another app, another run failed, a truncated list, a failed or pending status, the wrong level, a forged signature, edited after signing, an unknown format, reused, two submissions racing, a 2-1, another output, another brief, a tally that doesn't recompute, reviewers not from three named companies (unprefixed ids, an empty or odd prefix, `claudette`, `claude-*` beside `anthropic/`, case variants), receipts in an order a greedy match would get wrong, one receipt sent twice for two requirements, an unbound commit-and-hash pair, and a real live 2-1 receipt.
 - **The rest:** locks, budgets (also across two processes, a crashed holder, and a member named `__proto__`), a changed policy, shared keys in another spelling, and the member's name as an argument.
 
-**Mutants:** 31 checked (each removes one rule). 29 are caught. Both survivors remove a second check that another one already covers: the use-count precheck (the atomic use files still refuse reuse), and the canonical key spelling (the byte comparison still refuses a shared key).
+**Mutants:** 36 checked (each removes one rule). 33 are caught. All three survivors remove a second check that another one already covers:
+- the use-count precheck: the atomic use files still refuse reuse
+- the canonical key spelling: the byte comparison still refuses a shared key
+- the matching's "seen" set by index instead of id: the matching is keyed by receipt id anyway
 
 **Independent checks so far:**
 - a fresh-agent read of 9318fdd: 10 findings, all fixed in the next commit, each with a test
-- a review-3: planned on the fixed version
+- a review-3x3 of 7f47b61 (receipt `8006457af2764575bb723d52`, funded by the team allowance, $0.70): pass 2-1 (Sonnet pass, Luna needs_changes, Argon pass)
+  - 5 findings fixed in the next commit, each with a test
+  - 3 by design or wrong: the client ties votes to models; two fail closed
 
 ## What the gate can't do alone
 - **It only binds sessions that must go through it.** The Claude Code hooks (part C) and the sandbox (part D) make the owner-only commands and secret paths unreachable except through `check_action`. Without them, the gate is an honest agent's checklist, not a wall.
