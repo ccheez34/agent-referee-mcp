@@ -99,13 +99,49 @@ export async function startFakeService({ joinWaitSeconds = 15, reviewAnswer, tea
 
       if (req.method === "GET" && path === "/pubkey") return send(res, 200, { algorithm: "Ed25519", public_key: PUBLIC_KEY, history: [] });
 
+      let m;
       if (req.method === "POST" && path === "/matches") {
         const demo = body?.demo === true;
         const id = typeof body?.key === "string" && logic.KEY_RE.test(body.key) ? await logic.idForKey(body.key, demo) : logic.randomToken(12);
         const r = await forward(id, "create", { id, input: body });
+        // Invite match (host_pays): the real route adds the link the creator sends to the other agent.
+        if (r.status === 201 && body?.host_pays && r.body?.invite?.invite_token) {
+          r.body.invite = { ...r.body.invite, url: `http://${req.headers.host}/invite/${id}?token=${r.body.invite.invite_token}` };
+        }
         return send(res, r.status, r.body);
       }
-      let m;
+      if (req.method === "GET" && (m = path.match(/^\/invite\/([^/]+)$/))) {
+        if (!ID_RE.test(m[1])) return send(res, 400, { error: "Bad match id." });
+        const r = await forward(m[1], "status");
+        if (r.status !== 200) return send(res, r.status, r.body);
+        if (!r.body.host_pays) return send(res, 400, { error: "This match isn't an invite match." });
+        return send(res, 200, { invite: "test", match: r.body });
+      }
+      if (req.method === "POST" && path === "/invite/join") {
+        if (!body || typeof body.match_id !== "string" || !ID_RE.test(body.match_id)) return send(res, 400, { error: "match_id is required." });
+        if (typeof body.invite_token !== "string") return send(res, 400, { error: "invite_token is required." });
+        stats.guestJoins = (stats.guestJoins ?? 0) + 1;
+        const r = await forward(body.match_id, "join", { role: "guest", invite_token: body.invite_token, seat: body.seat });
+        return send(res, r.status, r.body);
+      }
+      if (req.method === "POST" && (m = path.match(/^\/host\/join\/(judge-2|judge-3)$/))) {
+        // The host's paid join (both seats): the same paywall stand-in as a seat.
+        if (!body || typeof body.match_id !== "string" || !ID_RE.test(body.match_id)) return send(res, 400, { error: "match_id is required." });
+        if (!payment) {
+          stats.unpaidAttempts++;
+          return send(res, 402, { x402Version: 1, error: "X-PAYMENT header is required", accepts: [] });
+        }
+        stats.paidRequests++;
+        const payer = logic.payerFromPaymentHeader(payment);
+        const r = await forward(body.match_id, "join", { seat: body.seat, tier: m[1], role: "host", paid: true, payments_enabled: true, wait: true, payer });
+        if (r.status < 400) {
+          stats.settled++;
+          stats.payers.push(payer);
+          const settlement = Buffer.from(JSON.stringify({ success: true, transaction: `0x${"cd".repeat(32)}`, network: "base", payer })).toString("base64");
+          return send(res, r.status, r.body, { "x-payment-response": settlement });
+        }
+        return send(res, r.status, r.body);
+      }
       if (req.method === "GET" && (m = path.match(/^\/matches\/([^/]+)$/))) {
         if (!ID_RE.test(m[1])) return send(res, 400, { error: "Bad match id." });
         const r = await forward(m[1], "status");
@@ -240,16 +276,16 @@ export async function startFakeService({ joinWaitSeconds = 15, reviewAnswer, tea
 
 /** A fake x402 paying fetch: adds an X-PAYMENT header shaped like a real one (the payer's address is readable). */
 export function fakePayingFetch(wallet = "0x" + "1".repeat(40)) {
-  return async (_key, maxMicro) => {
+  return async (_key, maxMicro, { baseFetch = fetch } = {}) => {
     let last = null;
     const header = Buffer.from(JSON.stringify({ x402Version: 1, scheme: "exact", network: "base", payload: { authorization: { from: wallet, value: String(maxMicro) } } })).toString("base64");
     return {
       wallet,
       lastSettlement: () => last,
       fetch: async (input, init = {}) => {
-        const first = await fetch(input, init);
+        const first = await baseFetch(input, init);
         if (first.status !== 402) return first;
-        const res = await fetch(input, { ...init, headers: { ...(init.headers ?? {}), "X-PAYMENT": header } });
+        const res = await baseFetch(input, { ...init, headers: { ...(init.headers ?? {}), "X-PAYMENT": header } });
         const h = res.headers.get("x-payment-response");
         if (h) last = JSON.parse(Buffer.from(h, "base64").toString("utf8"));
         return res;

@@ -8,6 +8,15 @@ export const MICRO = 1_000_000;
 export const toMicro = (usd) => Math.round(Number(usd) * MICRO);
 export const usd = (micro) => `$${(micro / MICRO).toFixed(micro % 10_000 === 0 ? 2 : 3)}`;
 const today = (now = new Date()) => now.toISOString().slice(0, 10); // UTC day, like the service's own limits
+
+/** The calendar day (YYYY-MM-DD) in an IANA time zone, e.g. "America/Denver" for a cap counted per Mountain Time day. */
+export function dayIn(timeZone) {
+  const fmt = new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" });
+  return (now = new Date()) => {
+    const parts = Object.fromEntries(fmt.formatToParts(now).map((p) => [p.type, p.value]));
+    return `${parts.year}-${parts.month}-${parts.day}`;
+  };
+}
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /** A reservation older than this belongs to a server that was killed mid-call: its payment may have gone through, so it counts as spent. */
@@ -43,13 +52,21 @@ class CorruptSpendFile extends Error {}
  * a lock file, so parallel calls, in this process or in others, can't overshoot it together.
  */
 export class Budget {
-  /** @param {{ dir: string, dailyLimitMicro: number, now?: () => Date }} opts */
-  constructor({ dir, dailyLimitMicro, now = () => new Date() }) {
-    this.path = join(dir, "spend.json");
-    this.lockPath = join(dir, "spend.lock");
+  /**
+   * @param {{ dir: string, dailyLimitMicro: number, now?: () => Date, name?: string, dayOf?: (d: Date) => string,
+   *           dayLabel?: string, limitSetting?: string }} opts
+   *   name: the record's file name (spend.json by default; the judge-match cap keeps its own). dayOf: which calendar
+   *   day a time belongs to (UTC by default). dayLabel and limitSetting only change the wording of messages.
+   */
+  constructor({ dir, dailyLimitMicro, now = () => new Date(), name = "spend", dayOf = today, dayLabel = "UTC", limitSetting = "AGENT_REFEREE_DAILY_LIMIT_USD" }) {
+    this.path = join(dir, `${name}.json`);
+    this.lockPath = join(dir, `${name}.lock`);
     this.dir = dir;
     this.limit = dailyLimitMicro;
     this.now = now;
+    this.dayOf = dayOf;
+    this.dayLabel = dayLabel;
+    this.limitSetting = limitSetting;
     this.queue = Promise.resolve(); // calls in this process take turns before contending for the file lock
   }
 
@@ -96,7 +113,7 @@ export class Budget {
   }
 
   async _load() {
-    const day = today(this.now());
+    const day = this.dayOf(this.now());
     let d;
     try {
       d = JSON.parse(await readFile(this.path, "utf8"));
@@ -108,7 +125,7 @@ export class Budget {
     }
     if (!d || typeof d !== "object" || !Number.isInteger(d.spent_micro))
       throw new CorruptSpendFile(`The spend record ${this.path} has an unexpected shape. To keep the daily cap safe, paid calls are paused. Nothing was charged. Check the file, or delete it to start the day's count from zero.`);
-    // A new UTC day starts from zero; reservations from yesterday belonged to yesterday.
+    // A new day starts from zero; reservations from yesterday belonged to yesterday.
     if (d.day !== day) return { day, spent_micro: 0, paid_calls: 0, pending: {} };
     d.pending = d.pending && typeof d.pending === "object" ? d.pending : {};
     d.unconfirmed = d.unconfirmed && typeof d.unconfirmed === "object" ? d.unconfirmed : {};
@@ -145,13 +162,13 @@ export class Budget {
   /** Reserve `priceMicro` or throw an Error explaining the cap. Returns { commit(), release() }, each safe to call once. */
   reserve(priceMicro) {
     return this._serial(async () => {
-      if (this.limit <= 0) throw new Error("Paid calls are turned off (AGENT_REFEREE_DAILY_LIMIT_USD is 0).");
+      if (this.limit <= 0) throw new Error(`Paid calls are turned off (${this.limitSetting} is 0).`);
       const id = randomUUID();
       await this._locked(async (d) => {
         const reserved = Budget.pendingMicro(d);
         if (d.spent_micro + reserved + priceMicro > this.limit)
           throw new Error(
-            `Daily spending cap reached: ${usd(d.spent_micro)} spent today (UTC)${reserved ? ` and ${usd(reserved)} in progress` : ""}, cap ${usd(this.limit)}, this call costs ${usd(priceMicro)}. The owner can raise AGENT_REFEREE_DAILY_LIMIT_USD in the MCP server's settings. Nothing was charged.`,
+            `Daily spending cap reached: ${usd(d.spent_micro)} spent today (${this.dayLabel})${reserved ? ` and ${usd(reserved)} in progress` : ""}, cap ${usd(this.limit)}, this call costs ${usd(priceMicro)}. The owner can raise ${this.limitSetting} in the MCP server's settings. Nothing was charged.`,
           );
         d.pending[id] = { micro: priceMicro, at: this.now().toISOString(), pid: process.pid };
         return d;

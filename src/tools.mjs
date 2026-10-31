@@ -4,6 +4,7 @@ import { DEFAULT_URL, RefereeError, Seat, sha256Hex, verifyOutcome, verifyReview
 import { ToolError } from "./protocol.mjs";
 import { validate } from "./validate.mjs";
 import { usd } from "./store.mjs";
+import { createJudgeTool } from "./judge-tool.mjs";
 
 /** What each paid call costs, in micro-USDC. Also the most a single request may pay, so a price change can never overcharge. */
 export const PRICES = { review: 50_000, "review-3": 200_000, "review-3x2": 600_000, "review-3x3": 700_000 };
@@ -118,7 +119,7 @@ function checkArgs(args, schema) {
 }
 
 /** Turn a service or network error into a message an agent can act on. Never includes anything secret. */
-function explain(e, { paid = false, demo = false, dropped = false, free = false } = {}) {
+export function explain(e, { paid = false, demo = false, dropped = false, free = false } = {}) {
   const none = demo ? "This is a free demo, so nothing is ever charged." : free ? "Free reviews are never charged." : paid ? "Nothing was charged." : "";
   if (e instanceof RefereeError) {
     const msg = String(e.message || `HTTP ${e.status}`);
@@ -175,7 +176,7 @@ function matchSummary(st, mySeat) {
  * @param {import("./store.mjs").Budget} deps.budget
  * @param {import("./store.mjs").ReceiptStore} deps.receipts
  */
-export function createTools({ config, makeClient, makePayingFetch, budget, receipts, baseFetch }) {
+export function createTools({ config, makeClient, makePayingFetch, budget, receipts, baseFetch, judgeBudget, judgePollMs }) {
   const pinned = config.publicKeys;
   const team = config.team ?? null;
   const teamClient = () => makeClient({ url: config.url, fetch: makeTeamFetch(team, config.url ?? DEFAULT_URL, baseFetch), publicKeys: pinned });
@@ -899,6 +900,8 @@ export function createTools({ config, makeClient, makePayingFetch, budget, recei
           },
         ]
       : []),
+    // judge_match: listed only when the owner switched it on (AGENT_REFEREE_JUDGE=on).
+    ...(config.judge && judgeBudget ? [createJudgeTool({ config, pinned, makeClient, makePayingFetch, judgeBudget, receipts, explain, baseFetch, ...(judgePollMs ? { pollMs: judgePollMs } : {}) })] : []),
   ];
 }
 

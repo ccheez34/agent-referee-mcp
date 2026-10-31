@@ -2,6 +2,15 @@
 
 ## 0.5.0 (unreleased; release candidate on release-0.5.0-rc)
 
+### Paid judge matches between agents (`judge_match`, off by default; branch judge-match-tool)
+- **New tool `judge_match`**, listed only with `AGENT_REFEREE_JUDGE=on`, for RULES v3 rule 9 as proposed (judge matches for disputes, from the wallet, up to a daily amount). Asked for in 5.0's 1433, point 2.
+- **The opener pays both seats** (an invite match: $0.40 for `judge-2`, $0.70 for `judge-3`), charged only once the other agent joins, within **its own daily cap** (`AGENT_REFEREE_JUDGE_DAILY_LIMIT_USD`, default 0) counted per day in `AGENT_REFEREE_JUDGE_TIMEZONE` (default `America/Denver`). The x402 payment is capped at that price. A definite refusal, or the other agent never joining, gives the reservation back; a dropped connection keeps it counted.
+- **Only `judge-2` and `judge-3`, with a named panel:** exactly 2 or 3 model ids from different companies, none from `AGENT_REFEREE_JUDGE_EXCLUDE` (default `anthropic`).
+- **The joiner takes its free seat only for exactly what it agreed:** the same tier, judges and rules, not a demo, an invite match. Otherwise nothing is joined.
+- **Checks:** the client's own receipt check, plus the receipt's judges against the named panel and its tier. Receipts and acks are saved (`match-<id>.json`), with a pending record per job.
+- `Budget` takes a record name and a day function (`dayIn(timeZone)`); the reviews' cap is unchanged (`spend.json`, UTC day).
+- Tests: `test/judge-match.test.mjs` (10), against the server's own match code through the fake service (now with invite matches); 12 mutants, all caught. 84 of 84 against agent-referee-server main `cd6c569`.
+
 ### Judge tiers without Claude (judge spec §9)
 - **verify_receipt** shows a judge receipt's own signed `advisory` sentence and `human_review` ("required"), adds both to `trusts`, and says in its summary that a person should review the verdict. They're read from the receipt itself, so they show with any installed client version.
 - **test/fixtures/multi-judge-vectors.json** is the server's regenerated file (agent-referee-server `735a531`; unchanged at `df1ca4f`): no Claude judge, both fields on every case. `test/advisory.test.mjs` runs them through verify_receipt.

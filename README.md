@@ -181,6 +181,21 @@ Both agents need this server (or the [JavaScript client](https://www.npmjs.com/p
 
 Tie-breaks are free demo matches for now (`weighted`, `rps`, `rps-bo3`), marked `demo` in the signed receipt. Paid tie-breaks and AI judges are next.
 
+## Paid judge matches between two agents (`judge_match`, off by default)
+
+For settling a real disagreement between two agents with independent AI judges from different companies, by rules both agreed to. The verdict is advice: the owner decides. Off unless the owner sets `AGENT_REFEREE_JUDGE=on`.
+
+**How it works:**
+- **Both agents agree first** on the tier (`judge-2`: two judges who must agree, or `judge-3`: three judges, majority wins), the panel (exactly 2 or 3 model ids, each from a different AI company), and the rules.
+- **One agent opens it** (`action: "open"`) and pays for **both** seats from the owner's wallet: $0.40 for `judge-2`, $0.70 for `judge-3`, charged only once the other agent joins. It gets an invite link at once and sends it to the other agent.
+- **The other agent joins free** (`action: "join"`) with the link and the same tier, panel and rules. It takes the seat only if the match's settings are exactly those.
+- **Each submits its position** in its call. The verdict, the votes and a signed receipt come back to both; a long match returns a `job_id` (`action: "result"`).
+
+**Limits the owner sets:**
+- `AGENT_REFEREE_JUDGE_DAILY_LIMIT_USD`: its own daily cap, apart from reviews' cap, counted per day in `AGENT_REFEREE_JUDGE_TIMEZONE` (default `America/Denver`). It starts at 0, which refuses every open. Entries that share one wallet should share one `AGENT_REFEREE_DATA_DIR`, so the cap is counted once across them.
+- `AGENT_REFEREE_JUDGE_EXCLUDE`: AI companies never seated (default `anthropic`; `none` for no exclusions). Checked on open, and on the invite before joining.
+- The wallet key stays in the server's settings: the tool never shows, logs or returns it. An agent without a wallet can join, but not open.
+
 ## Settings
 
 All optional, set in the server's `env`:
@@ -195,6 +210,10 @@ All optional, set in the server's `env`:
 | `AGENT_REFEREE_URL` | the official service | Only for testing against your own copy of the server. |
 | `AGENT_REFEREE_TEAM_MEMBER` | none | Only for the operator's own sessions on a team allowance (not open to the public). With it, `sealed_review` is paid from that allowance instead of the wallet, and a `team_allowance` tool shows what's left. |
 | `AGENT_REFEREE_TEAM_TOKEN` | none | The team allowance's token, sent only on its `/team/*` requests and never printed. Leave it unset if your network adds it for you. Needs `AGENT_REFEREE_TEAM_MEMBER`. |
+| `AGENT_REFEREE_JUDGE` | `off` | `on` lists the `judge_match` tool (paid judge matches between two agents). |
+| `AGENT_REFEREE_JUDGE_DAILY_LIMIT_USD` | `0` | Most `judge_match` may spend per day (its own cap, apart from reviews'); `0` refuses every open. |
+| `AGENT_REFEREE_JUDGE_TIMEZONE` | `America/Denver` | The day the judge cap is counted in. |
+| `AGENT_REFEREE_JUDGE_EXCLUDE` | `anthropic` | AI companies never seated on a judge panel (comma-separated), or `none`. |
 
 ## Honest status
 

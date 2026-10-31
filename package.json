@@ -13,7 +13,7 @@
   },
   "files": ["bin", "src", "README.md", "CHANGELOG.md", "LICENSE"],
   "scripts": {
-    "test": "node --test test/protocol.test.mjs test/store.test.mjs test/format.test.mjs test/multi.test.mjs test/multi-judge.test.mjs test/advisory.test.mjs test/team.test.mjs test/slow-review.test.mjs test/e2e.test.mjs"
+    "test": "node --test test/protocol.test.mjs test/store.test.mjs test/format.test.mjs test/multi.test.mjs test/multi-judge.test.mjs test/advisory.test.mjs test/team.test.mjs test/slow-review.test.mjs test/e2e.test.mjs test/judge-match.test.mjs"
   },
   "dependencies": {
     "agent-referee-client": "^0.10.0"
