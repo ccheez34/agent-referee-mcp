@@ -419,10 +419,12 @@ export function createTools({ config, makeClient, makePayingFetch, budget, recei
   // review_result returns it. A "pending" record is saved before anything is sent, so even a server that's killed
   // mid-review leaves a trace in saved_receipts.
   const DEFAULT_WAIT_S = 45;
+  const MAX_JOBS = config.maxJobs ?? 100;
   const jobs = new Map();
   const newJobId = () => `job_${Date.now().toString(36)}_${randomBytes(5).toString("hex")}`;
 
-  async function savePending(job, args, extra = {}) {
+  /** Saves the job's pending record. Before sending (required) a failure stops the review; afterwards it's reported. */
+  async function savePending(job, args, extra = {}, required = false) {
     try {
       await receipts.save("pending", job.id, {
         summary: `${job.tier} ${job.status}${args.title ? ` — ${args.title}` : ""}`,
@@ -437,7 +439,13 @@ export function createTools({ config, makeClient, makePayingFetch, budget, recei
         note: "Saved before the review was sent. If status is still \"running\" and no review receipt followed, the server stopped mid-review: the review may have finished and been charged without its answer arriving.",
         ...extra,
       });
-    } catch {}
+      return null;
+    } catch (e) {
+      const why = String(e?.message ?? e).slice(0, 200);
+      if (required)
+        throw new ToolError(`Couldn't save the pending record before sending (${why}), so nothing was sent or charged. Check that ${receipts.dir} can be written, or turn receipt saving off (AGENT_REFEREE_SAVE_RECEIPTS=false).`);
+      return `Couldn't update the pending record ${job.id} (${why}); the review's own receipt is unaffected.`;
+    }
   }
 
   /** Waits up to `seconds` for the job; returns its result, throws its error, or says it's still running. */
@@ -447,7 +455,7 @@ export function createTools({ config, makeClient, makePayingFetch, budget, recei
       await Promise.race([job.settled, new Promise((r) => (timer = setTimeout(r, seconds * 1000)))]);
       clearTimeout(timer);
     }
-    if (job.status === "done") return { job_id: job.id, status: "done", ...job.result };
+    if (job.status === "done") return { ...job.result, job_id: job.id, status: "done", ...(job.pendingProblem ? { pending_record_problem: job.pendingProblem } : {}) };
     if (job.status === "failed") {
       if (job.error instanceof ToolError) throw job.error;
       throw new ToolError(String(job.error?.message ?? job.error));
@@ -463,19 +471,20 @@ export function createTools({ config, makeClient, makePayingFetch, budget, recei
 
   async function sealedReview(args, { progress }) {
     checkArgs(args, reviewSchema);
+    const plan = reviewPlan(args); // argument mistakes are refused here, before any record or send
     const job = { id: newJobId(), status: "running", tier: args.tier ?? "review", started_at: new Date().toISOString() };
     let live = true; // progress notifications only while the call that started the review is still open
     const say = (m) => {
       if (live) progress(m);
     };
-    job.settled = runReview(args, say, async () => {
+    job.settled = runReview(args, plan, say, async () => {
+      await savePending(job, args, {}, true);
       job.sent = true;
-      await savePending(job, args);
     }).then(
       async (result) => {
         job.status = "done";
         job.result = result;
-        await savePending(job, args, { review_id: result.review_id, receipt_file: result.receipt_file ?? null });
+        job.pendingProblem = await savePending(job, args, { review_id: result.review_id, receipt_file: result.receipt_file ?? null });
       },
       async (e) => {
         job.status = "failed";
@@ -484,6 +493,11 @@ export function createTools({ config, makeClient, makePayingFetch, budget, recei
       },
     );
     jobs.set(job.id, job);
+    // Keep memory bounded: finished jobs beyond the newest MAX_JOBS are dropped (their pending records stay on disk).
+    for (const [id, j] of jobs) {
+      if (jobs.size <= MAX_JOBS) break;
+      if (j.status !== "running") jobs.delete(id);
+    }
     try {
       return await awaitJob(job, args.wait_seconds ?? DEFAULT_WAIT_S);
     } finally {
@@ -495,7 +509,7 @@ export function createTools({ config, makeClient, makePayingFetch, budget, recei
     type: "object",
     required: ["job_id"],
     properties: {
-      job_id: { type: "string", pattern: "^job_[a-z0-9]+_[0-9a-f]{10}$", description: "The job_id sealed_review returned." },
+      job_id: { type: "string", pattern: "^[A-Za-z0-9_-]{1,64}$", description: "The job_id sealed_review returned." },
       wait_seconds: { type: "integer", minimum: 0, maximum: 300, description: "How long to wait for it to finish (default 45; keep it under 60 through a link that gives up after 60 seconds)." },
     },
     additionalProperties: false,
@@ -506,13 +520,15 @@ export function createTools({ config, makeClient, makePayingFetch, budget, recei
     const job = jobs.get(args.job_id);
     if (!job) {
       const saved = await receipts.get(args.job_id).catch(() => null);
-      if (saved) return { summary: `This server has restarted since that review; its saved record is below.${saved.review_id ? ` The receipt is saved as review ${saved.review_id} (saved_receipts).` : ""}`, ...saved };
+      if (saved) return { ...saved, summary: `That job isn't in this server's memory any more (the server restarted, or the job is old); its saved record is below.${saved.review_id ? ` The receipt is saved as review ${saved.review_id} (saved_receipts).` : ""}` };
       throw new ToolError(`No review job ${args.job_id} on this server (it may have restarted). Check saved_receipts.`);
     }
     return awaitJob(job, args.wait_seconds ?? DEFAULT_WAIT_S);
   }
 
-  async function runReview(args, progress, beforeSend) {
+  /** Checks a review's arguments before anything is saved or sent: throws a ToolError, or returns { tier, n, price }.
+   *  It runs in the sealed_review call itself, so a mistake is refused at once, whatever wait_seconds is. */
+  function reviewPlan(args) {
     if (args.task.trim().length < 10) throw new ToolError("task must be at least 10 characters of actual text.");
     const tier = args.tier ?? "review";
     const n = MULTI_PIECES[tier];
@@ -537,6 +553,13 @@ export function createTools({ config, makeClient, makePayingFetch, budget, recei
     if (args.criteria && new Set(args.criteria.map((c) => c.name.trim())).size !== args.criteria.length) throw new ToolError("criteria names must be unique.");
     if (args.criteria?.some((c) => !c.name.trim() || /[\n\r]/.test(c.name))) throw new ToolError("Each criteria name must be text on one line. Nothing was charged.");
     const price = PRICES[tier];
+    const viaWallet = !team && !(!n && args.free === true) && !(!n && !config.privateKey);
+    if (viaWallet && !/^0x[0-9a-fA-F]{64}$/.test(config.privateKey))
+      throw new ToolError("AGENT_REFEREE_PRIVATE_KEY is set but isn't a 0x-prefixed 64-character hex key. The owner needs to fix it in the MCP server settings. Nothing was charged.");
+    return { tier, n, price };
+  }
+
+  async function runReview(args, { tier, n, price }, progress, beforeSend) {
     await beforeSend(); // the "pending" record, saved before anything is sent
 
     if (!n && args.free === true) return reviewResult(args, tier, await freeReview(args, tier, progress), null, []);

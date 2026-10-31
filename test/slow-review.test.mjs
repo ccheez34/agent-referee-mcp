@@ -14,7 +14,7 @@ const TOKEN = "team-token-for-tests-" + "x".repeat(24);
 const vx = JSON.parse(readFileSync(new URL("./fixtures/multi-review-vectors.json", import.meta.url), "utf8"));
 const valid = vx.cases.find((c) => c.id === "valid-3x2");
 
-async function setup() {
+async function setup({ failPending = false, maxJobs } = {}) {
   const dir = await tempDir();
   const gate = {};
   gate.wait = new Promise((resolve, reject) => {
@@ -23,8 +23,15 @@ async function setup() {
   });
   const calls = [];
   const receipts = new ReceiptStore({ dir });
+  if (failPending) {
+    const save = receipts.save.bind(receipts);
+    receipts.save = async (kind, id, record) => {
+      if (kind === "pending") throw new Error("EACCES: permission denied");
+      return save(kind, id, record);
+    };
+  }
   const tools = createTools({
-    config: { publicKeys: [vx.public_key], dailyLimitMicro: 1_000_000, url: "https://example.invalid", team: { member: "T3", token: TOKEN } },
+    config: { publicKeys: [vx.public_key], dailyLimitMicro: 1_000_000, url: "https://example.invalid", team: { member: "T3", token: TOKEN }, ...(maxJobs ? { maxJobs } : {}) },
     makeClient: () => ({
       _call: async (method, path, body) => {
         calls.push({ path, body });
@@ -105,15 +112,39 @@ test("a review that fails after the call returned reports the failure, and the p
   assert.match(pending.error, /./);
 });
 
-test("argument mistakes are refused at once, before any pending record or sending", async () => {
+test("argument mistakes are refused at once, before any pending record or sending, even with wait_seconds 0", async () => {
   const s = await setup();
-  await assert.rejects(s.review({ ...args, pieces: [args.pieces[0]] }, { progress: () => {} }), /exactly 2 pieces|minItems|at least/);
+  const none = { progress: () => {} };
+  await assert.rejects(s.review({ ...args, pieces: [args.pieces[0]] }, none), /exactly 2 pieces|minItems|at least/);
+  // Checks that live in the tool's own code (not the schema), with no waiting at all (the review's finding, Oct 31):
+  await assert.rejects(s.review({ ...args, task: "          short     ", wait_seconds: 0 }, none), /at least 10 characters/);
+  await assert.rejects(s.review({ ...args, criteria: [{ name: "a", weight: 1 }, { name: "a ", weight: 2 }], wait_seconds: 0 }, none), /unique/);
+  await assert.rejects(s.review({ ...args, free: true, wait_seconds: 0 }, none), /paid only/);
   assert.equal(s.calls.length, 0);
   assert.equal((await s.saved({})).receipts.length, 0);
 });
 
-test("review_result: an unknown job says where to look", async () => {
+test("if the pending record can't be saved, nothing is sent or charged", async () => {
+  const s = await setup({ failPending: true });
+  s.gate.release();
+  await assert.rejects(s.review(args, { progress: () => {} }), /Couldn't save the pending record before sending .*nothing was sent or charged/);
+  assert.equal(s.calls.length, 0, "the review was never sent");
+});
+
+test("finished jobs beyond the newest maxJobs are dropped from memory; review_result then reads the saved record", async () => {
+  const s = await setup({ maxJobs: 2 });
+  s.gate.release();
+  const ids = [];
+  for (let i = 0; i < 3; i++) ids.push((await s.review({ ...args, title: `run ${i}` }, { progress: () => {} })).job_id);
+  const oldest = await s.result({ job_id: ids[0] });
+  assert.match(oldest.summary, /isn't in this server's memory/);
+  assert.equal(oldest.status, "done", "the saved pending record says done");
+  assert.equal(oldest.review_id, valid.receipt.payload.review_id);
+  assert.equal((await s.result({ job_id: ids[2] })).status, "done", "the newest is still in memory");
+});
+
+test("review_result: an unknown or mistyped job says where to look", async () => {
   const s = await setup();
   await assert.rejects(s.result({ job_id: "job_abc_0123456789" }), /saved_receipts/);
-  await assert.rejects(s.result({ job_id: "not-a-job" }), /./);
+  await assert.rejects(s.result({ job_id: "not-a-job" }), /saved_receipts/);
 });
