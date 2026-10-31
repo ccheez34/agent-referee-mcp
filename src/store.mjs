@@ -125,10 +125,21 @@ export class Budget {
     }
     if (!d || typeof d !== "object" || !Number.isInteger(d.spent_micro))
       throw new CorruptSpendFile(`The spend record ${this.path} has an unexpected shape. To keep the daily cap safe, paid calls are paused. Nothing was charged. Check the file, or delete it to start the day's count from zero.`);
-    // A new day starts from zero; reservations from yesterday belonged to yesterday.
-    if (d.day !== day) return { day, spent_micro: 0, paid_calls: 0, pending: {} };
+    // Every copy sharing this record must count the same day: copies that disagree would reset each other's count.
+    if (d.zone !== undefined && d.zone !== this.dayLabel)
+      throw new CorruptSpendFile(
+        `The spend record ${this.path} is counted per ${d.zone} day, but this copy of the server counts per ${this.dayLabel} day. Give every copy that shares this data folder the same setting. To keep the daily cap safe, paid calls are paused. Nothing was charged.`,
+      );
     d.pending = d.pending && typeof d.pending === "object" ? d.pending : {};
     d.unconfirmed = d.unconfirmed && typeof d.unconfirmed === "object" ? d.unconfirmed : {};
+    // A new day starts from zero, except what's still in flight: a reservation made yesterday that hasn't settled
+    // (a judge match can wait hours for the other agent) and a stale one that may still have been paid count in the
+    // new day until they're resolved, so a payment that settles after midnight can't push the new day over its cap.
+    if (d.day !== day) {
+      const carried = Object.values(d.unconfirmed).reduce((n, m) => n + (Number.isInteger(m) ? m : 0), 0);
+      d = { day, spent_micro: carried, paid_calls: 0, pending: d.pending, unconfirmed: d.unconfirmed };
+    }
+    d.zone = this.dayLabel;
     // A reservation from a server that was killed mid-call may have been paid: count it as spent, to be safe,
     // and remember it, so a late answer for it neither counts it twice nor loses it.
     const nowMs = this.now().getTime();

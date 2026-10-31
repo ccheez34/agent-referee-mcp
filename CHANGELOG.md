@@ -10,6 +10,13 @@
 - **Checks:** the client's own receipt check, plus the receipt's judges against the named panel and its tier. Receipts and acks are saved (`match-<id>.json`), with a pending record per job.
 - `Budget` takes a record name and a day function (`dayIn(timeZone)`); the reviews' cap is unchanged (`spend.json`, UTC day).
 - Tests: `test/judge-match.test.mjs` (10), against the server's own match code through the fake service (now with invite matches); 12 mutants, all caught. 84 of 84 against agent-referee-server main `cd6c569`.
+- **After a fresh read (4 findings fixed, each with a test and a mutant):**
+  - an unclear paid join (a 5xx, or a dropped connection whose recovery fails) now stays counted against the cap and says the payment may have gone through; only a 4xx gives the reservation back (it was released, with "Nothing was charged");
+  - a reservation still in flight at midnight counts in the new day until it's resolved, so a match opened at 23:55 and paid at 00:06 can't push the new day over its cap (this also applies to the reviews' cap, where the window is seconds);
+  - the spend record names the day it's counted in (`zone`), and a copy with a different time zone setting is refused instead of resetting the other's count;
+  - a forfeit is reported as a forfeit (no judge ran), not as the judges' verdict.
+  - Left as a known limit (README): the opener's side forfeits if its server stops between the payment and the submit.
+  - 89 of 89 tests.
 
 ### Judge tiers without Claude (judge spec §9)
 - **verify_receipt** shows a judge receipt's own signed `advisory` sentence and `human_review` ("required"), adds both to `trusts`, and says in its summary that a person should review the verdict. They're read from the receipt itself, so they show with any installed client version.

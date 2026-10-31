@@ -114,8 +114,10 @@ export function createJudgeTool({ config, pinned, makeClient, makePayingFetch, j
     if (st.phase !== "done" || !st.receipt) throw new ToolError(`The match ended without a verdict (phase: ${st.phase}). ${String(st.error ?? "").slice(0, 300)}`.trim(), { match_id: job.match_id });
     const problems = [...(st.check?.problems ?? [])];
     const p = st.receipt.payload ?? {};
-    const judged = panelOf({ judge: p.proof?.judge }).length ? panelOf({ judge: p.proof?.judge }) : panelOf(st);
-    if (!sameSet(judged, args.panel)) problems.push(`The judges in the receipt (${judged.join(", ") || "none"}) aren't the panel you agreed on (${args.panel.join(", ")}).`);
+    const forfeit = st.result?.by_forfeit === true;
+    // A forfeit is decided without judges (the receipt has none); otherwise the receipt's own signed judges count.
+    const judged = panelOf({ judge: p.proof?.judge });
+    if (!forfeit && !sameSet(judged, args.panel)) problems.push(`The judges in the receipt (${judged.join(", ") || "none"}) aren't the panel you agreed on (${args.panel.join(", ")}).`);
     if (p.tier !== job.tier) problems.push(`The receipt is for ${p.tier}, not ${job.tier}.`);
     if (p.demo === true) problems.push("The receipt is a demo receipt, not a paid result.");
     const ok = st.check?.ok === true && problems.length === 0;
@@ -141,12 +143,13 @@ export function createJudgeTool({ config, pinned, makeClient, makePayingFetch, j
     }
     const advisory = typeof p.advisory === "string" ? p.advisory : null;
     return {
-      summary: `${ok ? "" : "WARNING: the receipt check FAILED (see check.problems); don't rely on this verdict. "}${r.mistrial ? "Mistrial: no fair verdict was possible; it goes back to the owner." : `${r.winner ?? "Nobody"} won. ${youWon ? "You won." : "You didn't win."}`} The verdict is advice: the owner decides.`,
+      summary: `${ok ? "" : "WARNING: the receipt check FAILED (see check.problems); don't rely on this verdict. "}${forfeit ? `${r.winner ?? "Nobody"} won by forfeit: the other side didn't submit in time, so no judge ran. ${youWon ? "You won." : "You didn't win."} It goes back to the owner.` : r.mistrial ? "Mistrial: no fair verdict was possible; it goes back to the owner." : `${r.winner ?? "Nobody"} won. ${youWon ? "You won." : "You didn't win."} The verdict is advice: the owner decides.`}`,
       match_id: job.match_id,
       tier: job.tier,
       my_seat: job.seat,
       winner: r.winner ?? null,
       you_won: youWon,
+      ...(forfeit ? { by_forfeit: true } : {}),
       ...(r.mistrial ? { mistrial: true, mistrial_code: r.mistrial_code ?? null } : {}),
       votes: r.votes ?? r.panel ?? undefined,
       check: { ok, problems },
@@ -267,12 +270,18 @@ export function createJudgeTool({ config, pinned, makeClient, makePayingFetch, j
       try {
         seat = await ref.join(job.match_id, args.my_seat, { inviteWaitMs: (args.invite_wait_minutes ?? 30) * 60_000 });
       } catch (e) {
-        // A definite answer (any HTTP error, including the other agent never joining) means the payment never
-        // settled. No answer at all is ambiguous: keep it counted, so the cap errs on the safe side.
-        const dropped = !(e instanceof RefereeError) && !/exceeds maximum|max(imum)? ?value|amount exceeds/i.test(String(e?.message ?? e));
-        await settle(dropped);
+        // Only a 4xx from the service (the other agent never joining is a 408) or the payment limit refusing before
+        // signing means the payment never settled. Anything else is ambiguous, including a 5xx or a failed recovery
+        // that the client reports as a service error: keep it counted, so the cap errs on the safe side.
+        const definite = (e instanceof RefereeError && e.status >= 400 && e.status < 500) || /exceeds maximum|max(imum)? ?value|amount exceeds/i.test(String(e?.message ?? e));
+        await settle(!definite);
         if (e instanceof RefereeError && e.status === 408) throw new ToolError(`The other agent didn't join within ${args.invite_wait_minutes ?? 30} minutes. Nothing was charged. Open a new match when you're both ready.`, { match_id: job.match_id });
-        throw new ToolError(explain(e, { paid: true, dropped }), { match_id: job.match_id, wallet: payer.wallet ?? null, ...(warnings.length ? { warnings } : {}) });
+        const details = { match_id: job.match_id, wallet: payer.wallet ?? null, ...(warnings.length ? { warnings } : {}) };
+        if (definite) throw new ToolError(explain(e, { paid: true }), details);
+        throw new ToolError(
+          `The paid join didn't get a clear answer (${String(e?.message ?? e).slice(0, 200)}), so the payment for both seats may have gone through. It's counted against today's judge cap to be safe. Check the match at GET /matches/${job.match_id} and the wallet on basescan.org; a paid match that can't be judged goes on the operator's refund list (hello@agentreferee.ai, with the match id).`,
+          details,
+        );
       }
       // Both seats are filled, so the payment settled.
       await settle(true);

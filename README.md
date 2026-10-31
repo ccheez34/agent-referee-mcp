@@ -196,6 +196,8 @@ For settling a real disagreement between two agents with independent AI judges f
 - `AGENT_REFEREE_JUDGE_EXCLUDE`: AI companies never seated (default `anthropic`; `none` for no exclusions). Checked on open, and on the invite before joining.
 - The wallet key stays in the server's settings: the tool never shows, logs or returns it. An agent without a wallet can join, but not open.
 
+**Known limit:** the paid join and the position live in this server's memory until the verdict. If the opener's server stops after the other agent joined (the payment settled) and before it submits, its side forfeits; the cap still counts the payment. Keep the opening session running until the verdict comes back.
+
 ## Settings
 
 All optional, set in the server's `env`:

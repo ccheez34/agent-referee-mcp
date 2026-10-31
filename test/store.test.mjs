@@ -38,7 +38,7 @@ test("spend is kept on disk, survives a restart, and resets at the start of each
   const b1 = new Budget({ dir, dailyLimitMicro: 1_000_000, now: () => now });
   await (await b1.reserve(200_000)).commit();
   const saved = JSON.parse(await readFile(join(dir, "spend.json"), "utf8"));
-  assert.deepEqual(saved, { day: "2026-10-27", spent_micro: 200_000, paid_calls: 1, pending: {} });
+  assert.deepEqual(saved, { day: "2026-10-27", spent_micro: 200_000, paid_calls: 1, pending: {}, zone: "UTC" });
   const b2 = new Budget({ dir, dailyLimitMicro: 1_000_000, now: () => now });
   assert.equal((await b2.status()).spent_micro, 200_000, "a restarted server remembers today's spend");
   now = new Date("2026-10-28T00:00:01Z");

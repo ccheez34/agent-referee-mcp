@@ -206,12 +206,12 @@ test("join and result: argument mistakes are refused", { skip }, async () => {
 
 // Stub service: covers what the real match code never does (judges in the receipt that differ from the named panel; a
 // dropped connection on the paid join).
-async function stubbed({ receiptPanel = PANEL2, joinError } = {}) {
+async function stubbed({ receiptPanel = PANEL2, joinError, result = { winner: "alpha" } } = {}) {
   const { createTools } = await import("../src/tools.mjs");
   const { ReceiptStore } = await import("../src/store.mjs");
   const dir = await tempDir();
   const judgeBudget = new Budget({ dir, dailyLimitMicro: 4_000_000, name: "judge-spend", dayOf: dayIn("America/Denver") });
-  const st = { phase: "done", result: { winner: "alpha" }, check: { ok: true, problems: [] }, receipt: { payload: { tier: "judge-2", match_id: "a".repeat(24), proof: { judge: { panel: receiptPanel.map((model) => ({ model })) } } } }, acks: [] };
+  const st = { phase: "done", result, check: { ok: true, problems: [] }, receipt: { payload: { tier: "judge-2", match_id: "a".repeat(24), proof: { judge: { panel: receiptPanel.map((model) => ({ model })) } } } }, acks: [] };
   const makeClient = () => ({
     create: async () => ({ match_id: "a".repeat(24), invite: { url: "http://x/invite/" + "a".repeat(24) + "?token=t" }, judge: { panel: PANEL2.map((model) => ({ model })) } }),
     join: async () => {
@@ -243,6 +243,89 @@ test("a receipt whose judges aren't the named panel fails the check", async () =
 test("a dropped connection on the paid join stays counted against the cap (it may have settled)", async () => {
   const { tool, dir, ctx } = await stubbed({ joinError: new TypeError("fetch failed: socket hang up") });
   const o = await tool.handler(openArgs(), ctx);
-  await assert.rejects(tool.handler({ action: "result", job_id: o.job_id, wait_seconds: 5 }, ctx), /connection to Agent Referee failed/);
+  await assert.rejects(tool.handler({ action: "result", job_id: o.job_id, wait_seconds: 5 }, ctx), /may have gone through\. It's counted against today's judge cap/);
   assert.equal((await spend(dir)).spent_micro, 400_000);
+});
+
+test("a forfeit is reported as a forfeit, not as the judges' verdict", async () => {
+  const { tool, ctx } = await stubbed({ receiptPanel: [], result: { winner: "alpha", by_forfeit: true, forfeited: ["beta"] } });
+  const o = await tool.handler(openArgs(), ctx);
+  const r = await tool.handler({ action: "result", job_id: o.job_id, wait_seconds: 5 }, ctx);
+  assert.equal(r.by_forfeit, true);
+  assert.equal(r.check.ok, true, r.check.problems.join(" "));
+  assert.match(r.summary, /won by forfeit: the other side didn't submit in time, so no judge ran/);
+});
+
+// Fresh read, H1: the real client turns a dropped paid join plus a failed recovery into a service error (a 5xx).
+// That's no proof the payment didn't settle, so it stays counted; only a 4xx gives the reservation back.
+for (const mode of ["socket", "gw502"]) {
+  test(`an unclear paid join (${mode}, then a 503 on recovery) stays counted against the cap`, async () => {
+    const { AgentReferee } = await import("agent-referee-client");
+    const { createTools } = await import("../src/tools.mjs");
+    const { ReceiptStore } = await import("../src/store.mjs");
+    const MID = "a".repeat(24);
+    const status = { match_id: MID, tier: "judge-2", phase: "joining", host_pays: "alpha", seats: [{ seat: "alpha" }, { seat: "beta" }], rules: RULES, judge: { panel: PANEL2.map((model) => ({ model })) } };
+    const json = (code, b) => new Response(JSON.stringify(b), { status: code, headers: { "content-type": "application/json" } });
+    const baseFetch = async (url, init = {}) => {
+      const u = new URL(url);
+      if (init.method === "POST" && u.pathname === "/matches") return json(201, { ...status, invite: { url: `http://svc.test/invite/${MID}?token=t` } });
+      if (u.pathname === `/matches/${MID}`) return json(200, status);
+      if (u.pathname === "/host/join/judge-2") {
+        if (!new Headers(init.headers || {}).get("X-PAYMENT")) return json(402, { error: "X-PAYMENT header is required" });
+        if (mode === "gw502") return json(502, { error: "Bad gateway" });
+        throw new TypeError("fetch failed: socket hang up");
+      }
+      if (u.pathname === `/matches/${MID}/recover`) return json(503, { error: "busy, try again" });
+      return json(404, { error: "?" });
+    };
+    const dir = await tempDir();
+    const judgeBudget = new Budget({ dir, dailyLimitMicro: 4_000_000, name: "judge-spend", dayOf: dayIn("America/Denver"), dayLabel: "America/Denver" });
+    const tools = createTools({
+      config: { url: "http://svc.test", publicKeys: [], privateKey: "0x" + "a".repeat(64), dailyLimitMicro: 0, judge: { dailyLimitMicro: 4_000_000, exclude: ["anthropic"], timeZone: "America/Denver" } },
+      makeClient: (o) => new AgentReferee(o),
+      makePayingFetch: fakePayingFetch(),
+      baseFetch,
+      budget: new Budget({ dir, dailyLimitMicro: 0 }),
+      receipts: new ReceiptStore({ dir }),
+      judgeBudget,
+      judgePollMs: 10,
+    });
+    const tool = tools.find((t) => t.name === "judge_match");
+    const ctx = { progress: () => {} };
+    const o = await tool.handler(openArgs({ invite_wait_minutes: 1 }), ctx);
+    await assert.rejects(tool.handler({ action: "result", job_id: o.job_id, wait_seconds: 20 }, ctx), (e) => /may have gone through. It's counted against today's judge cap/.test(e.message) && !/Nothing was charged/.test(e.message));
+    assert.equal((await spend(dir)).spent_micro, 400_000);
+  });
+}
+
+// Fresh read, H2: a reservation made before midnight that settles after it counts in the new day.
+test("a match opened before midnight and paid after it can't push the new day over the cap", async () => {
+  let now = new Date("2026-11-01T05:55:00Z"); // 23:55 MDT, Oct 31
+  const b = new Budget({ dir: await tempDir(), dailyLimitMicro: 1_400_000, now: () => now, name: "judge-spend", dayOf: dayIn("America/Denver"), dayLabel: "America/Denver" });
+  const late = await b.reserve(700_000);
+  now = new Date("2026-11-01T06:05:00Z"); // 00:05 MDT, Nov 1
+  await (await b.reserve(700_000)).commit();
+  await assert.rejects(b.reserve(700_000), /cap reached/);
+  await late.commit();
+  const s = await b.status();
+  assert.equal(s.day, "2026-11-01");
+  assert.equal(s.spent_micro, 1_400_000);
+  // Stale by now (the other agent took long): still counted until resolved, then given back if it never settled.
+  const again = new Budget({ dir: await tempDir(), dailyLimitMicro: 1_400_000, now: () => now, name: "judge-spend", dayOf: dayIn("America/Denver"), dayLabel: "America/Denver" });
+  now = new Date("2026-11-02T05:55:00Z");
+  const h = await again.reserve(700_000);
+  now = new Date("2026-11-02T06:20:00Z"); // next day, and stale
+  assert.equal((await again.status()).spent_micro, 700_000, "an unresolved reservation from yesterday counts today");
+  await h.release();
+  assert.equal((await again.status()).spent_micro, 0);
+});
+
+// Fresh read, M1: copies sharing one record must count the same day.
+test("server copies that count the cap in different time zones are refused, not allowed to reset each other", async () => {
+  const dir = await tempDir();
+  const now = () => new Date("2026-11-01T02:00:00Z"); // Oct 31 in Denver, Nov 1 in UTC
+  const a = new Budget({ dir, dailyLimitMicro: 1_400_000, now, name: "judge-spend", dayOf: dayIn("America/Denver"), dayLabel: "America/Denver" });
+  const b = new Budget({ dir, dailyLimitMicro: 1_400_000, now, name: "judge-spend", dayOf: dayIn("UTC"), dayLabel: "UTC" });
+  await (await a.reserve(700_000)).commit();
+  await assert.rejects(b.reserve(700_000), /counted per America\/Denver day, but this copy of the server counts per UTC day/);
 });
