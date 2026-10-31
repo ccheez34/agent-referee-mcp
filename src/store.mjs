@@ -21,6 +21,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /** A reservation older than this belongs to a server that was killed mid-call: its payment may have gone through, so it counts as spent. */
 export const STALE_RESERVATION_MS = 10 * 60_000;
+/** How long after it was made a reservation can still settle (a judge match waits up to 2 hours for the other agent,
+ * then is judged). Only reservations younger than this are carried into a new day; older ones stay with their day. */
+export const CARRY_RESERVATION_MS = 3 * 60 * 60_000;
 /** A lock file older than this was left by a crashed process and is taken over. Every locked step takes milliseconds. */
 const STALE_LOCK_MS = 30_000;
 const LOCK_WAIT_MS = 15_000;
@@ -128,7 +131,7 @@ export class Budget {
     // Every copy sharing this record must count the same day: copies that disagree would reset each other's count.
     if (d.zone !== undefined && d.zone !== this.dayLabel)
       throw new CorruptSpendFile(
-        `The spend record ${this.path} is counted per ${d.zone} day, but this copy of the server counts per ${this.dayLabel} day. Give every copy that shares this data folder the same setting. To keep the daily cap safe, paid calls are paused. Nothing was charged.`,
+        `The spend record ${this.path} is counted per ${d.zone} day, but this copy of the server counts per ${this.dayLabel} day. Give every copy that shares this data folder the same setting. If the owner changed it on purpose for every copy, delete that file once nothing is in progress (it holds only today's count). To keep the daily cap safe, paid calls are paused. Nothing was charged.`,
       );
     d.pending = d.pending && typeof d.pending === "object" ? d.pending : {};
     d.unconfirmed = d.unconfirmed && typeof d.unconfirmed === "object" ? d.unconfirmed : {};
@@ -136,8 +139,13 @@ export class Budget {
     // (a judge match can wait hours for the other agent) and a stale one that may still have been paid count in the
     // new day until they're resolved, so a payment that settles after midnight can't push the new day over its cap.
     if (d.day !== day) {
-      const carried = Object.values(d.unconfirmed).reduce((n, m) => n + (Number.isInteger(m) ? m : 0), 0);
-      d = { day, spent_micro: carried, paid_calls: 0, pending: d.pending, unconfirmed: d.unconfirmed };
+      const nowMs0 = this.now().getTime();
+      const young = (at) => nowMs0 - Date.parse(at) <= CARRY_RESERVATION_MS; // false for a missing or bad time
+      const pending = Object.fromEntries(Object.entries(d.pending).filter(([, p]) => Number.isInteger(p?.micro) && young(p.at)));
+      // An unconfirmed entry is { micro, at } (older records held only the amount: those aren't carried).
+      const unconfirmed = Object.fromEntries(Object.entries(d.unconfirmed).filter(([, u]) => Number.isInteger(u?.micro) && young(u.at)));
+      const carried = Object.values(unconfirmed).reduce((n, u) => n + u.micro, 0);
+      d = { day, spent_micro: carried, paid_calls: 0, pending, unconfirmed };
     }
     d.zone = this.dayLabel;
     // A reservation from a server that was killed mid-call may have been paid: count it as spent, to be safe,
@@ -148,7 +156,7 @@ export class Budget {
         if (Number.isInteger(p?.micro)) {
           d.spent_micro += p.micro;
           d.paid_calls = (d.paid_calls ?? 0) + 1;
-          d.unconfirmed[id] = p.micro;
+          d.unconfirmed[id] = { micro: p.micro, at: p.at };
         }
         delete d.pending[id];
       }

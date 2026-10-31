@@ -258,8 +258,8 @@ test("a forfeit is reported as a forfeit, not as the judges' verdict", async () 
 
 // Fresh read, H1: the real client turns a dropped paid join plus a failed recovery into a service error (a 5xx).
 // That's no proof the payment didn't settle, so it stays counted; only a 4xx gives the reservation back.
-for (const mode of ["socket", "gw502"]) {
-  test(`an unclear paid join (${mode}, then a 503 on recovery) stays counted against the cap`, async () => {
+for (const mode of ["socket", "gw502", "rec429"]) {
+  test(`an unclear paid join (${mode}; recovery answers ${mode === "rec429" ? "429" : "503"}) stays counted against the cap`, async () => {
     const { AgentReferee } = await import("agent-referee-client");
     const { createTools } = await import("../src/tools.mjs");
     const { ReceiptStore } = await import("../src/store.mjs");
@@ -275,7 +275,7 @@ for (const mode of ["socket", "gw502"]) {
         if (mode === "gw502") return json(502, { error: "Bad gateway" });
         throw new TypeError("fetch failed: socket hang up");
       }
-      if (u.pathname === `/matches/${MID}/recover`) return json(503, { error: "busy, try again" });
+      if (u.pathname === `/matches/${MID}/recover`) return mode === "rec429" ? json(429, { error: "Too many requests" }) : json(503, { error: "busy, try again" });
       return json(404, { error: "?" });
     };
     const dir = await tempDir();
@@ -328,4 +328,23 @@ test("server copies that count the cap in different time zones are refused, not 
   const b = new Budget({ dir, dailyLimitMicro: 1_400_000, now, name: "judge-spend", dayOf: dayIn("UTC"), dayLabel: "UTC" });
   await (await a.reserve(700_000)).commit();
   await assert.rejects(b.reserve(700_000), /counted per America\/Denver day, but this copy of the server counts per UTC day/);
+});
+
+// Fresh read's re-read: a reservation that's never resolved (a server killed mid-call) must not cut every later day's
+// cap. It's carried only while it could still settle (3 hours), so it stays with its own day after that.
+test("an unresolved reservation is carried into the next day only while it could still settle", async () => {
+  const dir = await tempDir();
+  let now = new Date("2026-10-31T12:00:00Z");
+  const mk = () => new Budget({ dir, dailyLimitMicro: 1_000_000, now: () => now });
+  await mk().reserve(700_000); // the process dies: never committed or released
+  now = new Date("2026-10-31T23:59:00Z");
+  assert.equal((await mk().status()).spent_micro, 700_000, "stale: counted as spent on its own day");
+  now = new Date("2026-11-01T12:00:00Z");
+  assert.equal((await mk().status()).left_micro, 1_000_000, "not carried: it was made 24 hours ago");
+  now = new Date("2026-11-15T12:00:00Z");
+  assert.equal((await mk().status()).left_micro, 1_000_000);
+  // A day-old record from before this change (unconfirmed held only the amount) isn't carried either.
+  const { writeFile } = await import("node:fs/promises");
+  await writeFile(join(dir, "spend.json"), JSON.stringify({ day: "2026-11-14", spent_micro: 700_000, paid_calls: 1, pending: {}, unconfirmed: { x: 700_000 } }));
+  assert.equal((await mk().status()).left_micro, 1_000_000);
 });

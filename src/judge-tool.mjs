@@ -272,8 +272,9 @@ export function createJudgeTool({ config, pinned, makeClient, makePayingFetch, j
       } catch (e) {
         // Only a 4xx from the service (the other agent never joining is a 408) or the payment limit refusing before
         // signing means the payment never settled. Anything else is ambiguous, including a 5xx or a failed recovery
-        // that the client reports as a service error: keep it counted, so the cap errs on the safe side.
-        const definite = (e instanceof RefereeError && e.status >= 400 && e.status < 500) || /exceeds maximum|max(imum)? ?value|amount exceeds/i.test(String(e?.message ?? e));
+        // that the client reports as a service error, and a 429, which can come from the recovery call after a dropped
+        // paid request: keep it counted, so the cap errs on the safe side.
+        const definite = (e instanceof RefereeError && e.status >= 400 && e.status < 500 && e.status !== 429) || /exceeds maximum|max(imum)? ?value|amount exceeds/i.test(String(e?.message ?? e));
         await settle(!definite);
         if (e instanceof RefereeError && e.status === 408) throw new ToolError(`The other agent didn't join within ${args.invite_wait_minutes ?? 30} minutes. Nothing was charged. Open a new match when you're both ready.`, { match_id: job.match_id });
         const details = { match_id: job.match_id, wallet: payer.wallet ?? null, ...(warnings.length ? { warnings } : {}) };

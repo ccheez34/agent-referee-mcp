@@ -17,6 +17,7 @@
   - a forfeit is reported as a forfeit (no judge ran), not as the judges' verdict.
   - Left as a known limit (README): the opener's side forfeits if its server stops between the payment and the submit.
   - 89 of 89 tests.
+- **After the fresh reader's re-read:** an in-flight reservation is carried into a new day only while it could still settle (3 hours), so a reservation left by a server killed mid-call no longer cuts every later day's cap (it stays with its own day, as before); a 429 after a dropped paid request (it can come from the recovery call) stays counted; the time-zone refusal says how to recover after a deliberate change. 91 of 91 tests.
 
 ### Judge tiers without Claude (judge spec §9)
 - **verify_receipt** shows a judge receipt's own signed `advisory` sentence and `human_review` ("required"), adds both to `trusts`, and says in its summary that a person should review the verdict. They're read from the receipt itself, so they show with any installed client version.
