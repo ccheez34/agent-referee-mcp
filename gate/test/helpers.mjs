@@ -83,9 +83,9 @@ export function revocation(nonce, key = owner) {
   return signDoc({ format: APPROVAL_FORMAT, type: "revocation", nonce, issued_at: iso(NOW - 1000) }, key);
 }
 
-export function checksReceipt({ runs, statuses = [], observedAt = NOW - 5 * 60_000, sha = SHA, repo = REPO, truncated = false, key = referee, envelopeKey, id = hex(12), check = "github_checks" } = {}) {
+export function checksReceipt({ runs, statuses = [], observedAt = NOW - 5 * 60_000, sha = SHA, repo = REPO, truncated = false, key = referee, envelopeKey, id = hex(12), check = "github_checks", onDefault, statusesTruncated = false } = {}) {
   const payload = {
-    format: PROOF_FORMAT,
+    receipt_format: PROOF_FORMAT,
     type: "proof",
     service: "Agent Referee",
     receipt_id: id,
@@ -103,16 +103,18 @@ export function checksReceipt({ runs, statuses = [], observedAt = NOW - 5 * 60_0
       source: "api.github.com",
     },
     issued_at: iso(NOW - 60_000),
-    caller: { member: "3.0" },
+    caller: { member: "3.0", verified: false },
     funding: "team",
     price_micro: 0,
   };
+  if (onDefault !== undefined) payload.observed.on_default_branch = onDefault;
+  if (statusesTruncated) payload.observed.statuses_truncated = true;
   return signDoc(payload, key, envelopeKey);
 }
 
 export function stampReceipt({ sha256 = DIFF_SHA256, issuedAt = NOW - 60_000, key = referee, id = hex(12) } = {}) {
   return signDoc(
-    { format: PROOF_FORMAT, type: "proof", service: "Agent Referee", receipt_id: id, level: "L0", check: "stamp", subject: { sha256 }, claimed: { text: "tests pass" }, note: "claimed by the caller; not checked by Agent Referee", issued_at: iso(issuedAt), caller: { member: "3.0" }, funding: "team", price_micro: 0 },
+    { receipt_format: PROOF_FORMAT, type: "proof", service: "Agent Referee", receipt_id: id, level: "L0", check: "stamp", subject: { sha256 }, claimed: { text: "tests pass" }, note: "claimed by the caller; not checked by Agent Referee", issued_at: iso(issuedAt), caller: { member: "3.0" }, funding: "team", price_micro: 0 },
     key,
   );
 }

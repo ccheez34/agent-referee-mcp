@@ -59,6 +59,8 @@ export function loadPolicy(text, pinnedSha256) {
         if (!Number.isInteger(r.max_age_minutes) || r.max_age_minutes < 1) problems.push(`${at}: max_age_minutes must be a whole number of minutes, at least 1.`);
         if (r.check === "github_checks" && (!Array.isArray(r.required_checks) || !r.required_checks.length || !r.required_checks.every((c) => typeof c?.name === "string" && c.name && typeof c?.app === "string" && c.app)))
           problems.push(`${at}: github_checks needs required_checks: [{"name": "...", "app": "github-actions"}], each check that must have passed and the GitHub app that must have run it.`);
+        if (r.on_default_branch !== undefined && (r.level !== "L1" || typeof r.on_default_branch !== "boolean"))
+          problems.push(`${at}: on_default_branch (true or false) applies to L1 requirements only.`);
         if (r.task_sha256 !== undefined && (r.level !== "L2" || !HEX64.test(String(r.task_sha256))))
           problems.push(`${at}: task_sha256 pins the brief of an L2 review, as 64 lower-case hex characters.`);
       });

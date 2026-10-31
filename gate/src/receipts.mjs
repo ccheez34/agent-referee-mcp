@@ -48,7 +48,7 @@ export function normalizeSubject(s) {
 /** The receipt's own id, used for "once per gate". */
 export function receiptId(receipt) {
   const p = receipt?.payload ?? {};
-  if (p.format === PROOF_FORMAT) return typeof p.receipt_id === "string" ? `proof-${p.receipt_id}` : null;
+  if (p.receipt_format === PROOF_FORMAT) return typeof p.receipt_id === "string" ? `proof-${p.receipt_id}` : null;
   if (p.type === "review") return typeof p.review_id === "string" ? `review-${p.review_id}` : null;
   return null;
 }
@@ -86,7 +86,8 @@ export async function receiptProblem(receipt, req, subject, { receiptKeys, now, 
     return ageProblem(p.created_at, req.max_age_minutes, now, skewMs, "the review's created_at");
   }
 
-  if (p.format !== PROOF_FORMAT) return `the gate doesn't know this receipt's format (${String(p.format ?? p.type).slice(0, 40)})`;
+  // The service signs the format as receipt_format (agent-referee-server d9578f4), as review-multi-v1 does.
+  if (p.receipt_format !== PROOF_FORMAT) return `the gate doesn't know this receipt's format (${String(p.receipt_format ?? p.format ?? p.type).slice(0, 40)})`;
   if (p.type !== "proof") return "not a proof receipt";
   if (p.level !== req.level || p.check !== req.check) return `this is ${p.level} ${p.check}; the policy requires ${req.level} ${req.check} here`;
 
@@ -104,6 +105,9 @@ export async function receiptProblem(receipt, req, subject, { receiptKeys, now, 
   if (o.commit_sha !== subject.sha) return "the observed commit differs from the subject";
   const stale = ageProblem(o.observed_at, req.max_age_minutes, now, skewMs, "observed_at");
   if (stale) return stale;
+  // A commit served through the repository's API can live only in a fork; the service records where it is.
+  if (req.on_default_branch === true && o.on_default_branch !== true)
+    return `the policy needs the commit on the default branch; the receipt says ${o.on_default_branch === false ? "it isn't" : "GitHub couldn't tell"}`;
   if (req.check === "github_commit") return null;
 
   if (o.check_runs_truncated) return "GitHub reported more check runs than the receipt lists, so it can't show every one passed";
@@ -116,6 +120,7 @@ export async function receiptProblem(receipt, req, subject, { receiptKeys, now, 
     if (mine.some((r) => r.status !== "completed")) return `the required check "${name}" was still running when observed, so it isn't a pass`;
     if (!mine.every((r) => PASSING.has(r.conclusion))) return `the required check "${name}" didn't succeed`;
   }
+  if (o.statuses_truncated) return "GitHub reported more commit statuses than the receipt lists, so it can't show every one succeeded";
   const statuses = Array.isArray(o.statuses) ? o.statuses : [];
   const badStatus = statuses.filter((s) => s.state !== "success");
   if (badStatus.length) return `commit statuses not successful: ${badStatus.map((s) => `${s.context} (${s.state})`).join(", ").slice(0, 300)}`;

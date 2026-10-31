@@ -32,7 +32,13 @@ Part B of the rules-in-code design (`research\specs\rules-in-code-2026-10-31\DES
 | `GATE_MEMBER` | This session's member name. |
 | `GATE_APPROVALS_URL` or `GATE_APPROVALS_FILE` | The approvals record: part A's `GET /approvals` (https only), or a file. Its integrity comes from the signatures, so whoever can write the record can delete approvals (they stop working) but can't make one. **Use the URL for real use.** With a file, someone who can write it can also delete a revocation before any gate has read it, and that reopens the approval. Once a gate has seen a revocation, it remembers it in the state folder for good. A file is for tests, or for a folder the sessions can't write. |
 
-Start: `node gate/bin/agent-referee-gate.mjs` (stdio). It needs `agent-referee-client` 0.10 or later, which this repo already depends on.
+Start: `node gate/bin/agent-referee-gate.mjs` (stdio).
+
+**As a command, for hooks that can't call an MCP tool:**
+- Syntax: `node gate/bin/agent-referee-gate.mjs check <action> <target> [target_sha256] [--dry-run]`, with the same settings in its environment.
+- It exits 0 only when the action is allowed, and an allowed check spends one use.
+- It exits 1 when the action isn't allowed, and 2 when the gate can't run.
+- It writes one JSON line to stdout and the reason to stderr. It needs `agent-referee-client` 0.10 or later, which this repo already depends on.
 
 ## The policy (`agent-referee-gate-policy-v1`)
 ```json
@@ -56,6 +62,8 @@ Start: `node gate/bin/agent-referee-gate.mjs` (stdio). It needs `agent-referee-c
 ```
 - **Only listed actions exist.** An unknown action is refused, so a hook or agent can't dodge with a new name.
 - **`required_checks` names each check and the GitHub app that ran it** (`"github-actions"`). A check of the same name from another app doesn't count. An agent that edits the workflow in its own commit so the check always passes is still a risk: protect the workflow files with branch protection, or require an L2 review too.
+- **`on_default_branch: true` on an L1 requirement** asks for a receipt that shows the commit on the repository's default branch. The service records this because a commit shown through a repository's API can live only in a fork. A receipt that says it isn't there, or that GitHub couldn't tell, is refused.
+- **Proof receipts carry their format as `receipt_format`** (`agent-referee-proof-v1`), as signed by agent-referee-server `d9578f4`. A truncated list of commit statuses is refused, like a truncated list of check runs.
 - **`task_sha256` on an L2 requirement** (optional) pins the review's brief, so an agent can't get three passes with an easy task. Without it, the done record still keeps the brief's hash (`review_task_sha256`) for anyone to check.
 - **A kind that mixes a commit (L1) and a hash (L0 or L2)** needs `"allow_unbound_pair": true`, set by the owner. No receipt yet proves that the reviewed diff belongs to that commit, so the done record says `pair_bound: false`.
 - **The keys must differ:** the gate won't start if an approval key is also a receipt key, compared as bytes. Each key must be written in its canonical base64 spelling.
@@ -78,9 +86,9 @@ It uses today's receipt envelope `{payload, signature, algorithm: "Ed25519", pub
 
 ## Tests
 
-`npm run test:gate` runs 55 tests, each trying to get past one rule:
+`npm run test:gate` runs 58 tests, each trying to get past one rule:
 - **Approvals:** missing, other action or target, other target_sha256, expired, dated ahead, a date that doesn't parse, other policy version, revoked (and still revoked after the revocation is deleted), a revocation ignored when the state can't be listed, used up, two processes racing for one use, signed by a forger, a forger's signature with the owner's key in the envelope, signed with Agent Referee's key, edited after signing, unsigned, and a record that can't be read.
-- **Receipts:** another commit or repo, stale or from the future, a required check still running, failed, missing or run by another app, another run failed, a truncated list, a failed or pending status, the wrong level, a forged signature, edited after signing, an unknown format, reused, two submissions racing, a 2-1, another output, another brief, a tally that doesn't recompute, reviewers not from three named companies (unprefixed ids, an empty or odd prefix, `claudette`, `claude-*` beside `anthropic/`, case variants), receipts in an order a greedy match would get wrong, one receipt sent twice for two requirements, an unbound commit-and-hash pair, and a real live 2-1 receipt.
+- **Receipts:** another commit or repo, stale or from the future, a required check still running, failed, missing or run by another app, another run failed, a truncated list, a failed or pending status, the wrong level, a forged signature, edited after signing, an unknown format, reused, two submissions racing, a 2-1, another output, another brief, a tally that doesn't recompute, reviewers not from three named companies (unprefixed ids, an empty or odd prefix, `claudette`, `claude-*` beside `anthropic/`, case variants), receipts in an order a greedy match would get wrong, one receipt sent twice for two requirements, an unbound commit-and-hash pair, a real live 2-1 receipt, and an L1 receipt built by the server's own code (d9578f4); the command form's exit codes.
 - **The rest:** locks, budgets (also across two processes, a crashed holder, and a member named `__proto__`), a changed policy, shared keys in another spelling, and the member's name as an argument.
 
 **Mutants:** 36 checked (each removes one rule). 33 are caught. All three survivors remove a second check that another one already covers:

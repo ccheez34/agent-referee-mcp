@@ -262,7 +262,7 @@ test("a receipt edited after signing is refused", async () => {
 test("an unknown receipt format is refused", async () => {
   const g = await gate();
   const rc = checksReceipt();
-  const odd = signDoc({ ...rc.payload, format: "agent-referee-proof-v9" }, referee);
+  const odd = signDoc({ ...rc.payload, receipt_format: "agent-referee-proof-v9" }, referee);
   assert.match(JSON.stringify((await g.call("submit_done", { kind: "merge", subject: commit, receipts: [odd] })).unmet), /doesn't know/);
 });
 
@@ -520,4 +520,58 @@ test("R3 (Sonnet): the order of receipts doesn't matter, and one receipt sent tw
   const twice = await g2.call("submit_done", { kind: "two", subject: commit, receipts: [same, same] });
   assert.equal(twice.accepted, false);
   assert.match(JSON.stringify(twice.unmet), /one receipt meets one requirement/);
+});
+
+// ---------------- the server's real receipt shape (agent-referee-server d9578f4) ----------------
+
+test("a proof receipt built by the server's own code (d9578f4) is accepted; the old `format` spelling isn't", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const real = JSON.parse(await readFile(new URL("./fixtures/server-d9578f4-l1-checks.json", import.meta.url), "utf8"));
+  const p = real.payload;
+  const policy = pinnedPolicy({ receipt_keys: [real.public_key], done: { merge: { require: [{ level: "L1", check: "github_checks", required_checks: [{ name: "test", app: "github-actions" }], max_age_minutes: 60, on_default_branch: true }] } } });
+  const g = await gate({ policy, now: () => Date.parse(p.observed.observed_at) + 60_000 });
+  const ok = await g.call("submit_done", { kind: "merge", subject: p.subject, receipts: [real] });
+  assert.equal(ok.accepted, true, JSON.stringify(ok));
+  const { receipt_format, ...rest } = rc0().payload;
+  const old = signDoc({ ...rest, format: receipt_format }, referee);
+  const g2 = await gate();
+  assert.match(JSON.stringify((await g2.call("submit_done", { kind: "merge", subject: commit, receipts: [old] })).unmet), /doesn't know/);
+});
+const rc0 = () => checksReceipt();
+
+test("on_default_branch: required and absent, false or unknown is refused; truncated statuses are refused", async () => {
+  const policy = pinnedPolicy({ done: { merge: { require: [{ level: "L1", check: "github_checks", required_checks: [{ name: "test", app: "github-actions" }], max_age_minutes: 60, on_default_branch: true }] } } });
+  const g = await gate({ policy });
+  for (const onDefault of [false, null, undefined]) assert.equal((await g.call("submit_done", { kind: "merge", subject: commit, receipts: [checksReceipt({ onDefault })] })).accepted, false, String(onDefault));
+  assert.equal((await g.call("submit_done", { kind: "merge", subject: commit, receipts: [checksReceipt({ onDefault: true })] })).accepted, true);
+  const g2 = await gate();
+  assert.match(JSON.stringify((await g2.call("submit_done", { kind: "merge", subject: commit, receipts: [checksReceipt({ statusesTruncated: true })] })).unmet), /more commit statuses/);
+  const text = JSON.stringify(policyObject({ done: { x: { require: [{ level: "L0", check: "stamp", max_age_minutes: 5, on_default_branch: true }] } } }));
+  assert.throws(() => loadPolicy(text, sha256OfText(text)), /L1 requirements only/);
+});
+
+// ---------------- the command form, for hooks (2.0's 1126, point 6) ----------------
+
+test("check command: exit 0 only when allowed (spending one use), 1 when not, 2 when the gate can't run", async () => {
+  const { spawnSync } = await import("node:child_process");
+  const { fileURLToPath } = await import("node:url");
+  const bin = fileURLToPath(new URL("../bin/agent-referee-gate.mjs", import.meta.url));
+  const dir = await mkdtemp(join(tmpdir(), "gate-cli-"));
+  const text = JSON.stringify(policyObject());
+  await writeFile(join(dir, "policy.json"), text);
+  const now = Date.now();
+  const a = approval({ issued_at: new Date(now - 60_000).toISOString(), expires_at: new Date(now + 3_600_000).toISOString() });
+  await writeFile(join(dir, "approvals.json"), JSON.stringify([a]));
+  const env = { ...process.env, GATE_POLICY: join(dir, "policy.json"), GATE_POLICY_SHA256: sha256OfText(text), GATE_STATE_DIR: join(dir, "state"), GATE_MEMBER: "3.0", GATE_APPROVALS_FILE: join(dir, "approvals.json") };
+  const run = (...args) => spawnSync(process.execPath, [bin, "check", ...args], { env, encoding: "utf8" });
+  assert.equal(run("deploy", DEPLOY.target, DEPLOY.target_sha256, "--dry-run").status, 0);
+  const first = run("deploy", DEPLOY.target, DEPLOY.target_sha256);
+  assert.equal(first.status, 0, first.stderr);
+  assert.equal(JSON.parse(first.stdout).allowed, true);
+  assert.equal(run("deploy", DEPLOY.target, DEPLOY.target_sha256).status, 1, "the one use is spent");
+  assert.equal(run("deploy", "somewhere-else").status, 1);
+  assert.equal(run("deploy_prod", "x").status, 1, "an unknown action is refused");
+  assert.equal(run("merge", "main").status, 0, "an open action");
+  assert.equal(spawnSync(process.execPath, [bin, "check", "deploy", "x"], { env: { ...env, GATE_POLICY_SHA256: "0".repeat(64) }, encoding: "utf8" }).status, 2);
+  assert.equal(spawnSync(process.execPath, [bin, "check"], { env, encoding: "utf8" }).status, 2);
 });
