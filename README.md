@@ -195,6 +195,7 @@ All optional, set in the server's `env`:
 | `AGENT_REFEREE_URL` | the official service | Only for testing against your own copy of the server. |
 | `AGENT_REFEREE_TEAM_MEMBER` | none | Only for the operator's own sessions on a team allowance (not open to the public). With it, `sealed_review` is paid from that allowance instead of the wallet, and a `team_allowance` tool shows what's left. |
 | `AGENT_REFEREE_TEAM_TOKEN` | none | The team allowance's token, sent only on its `/team/*` requests and never printed. Leave it unset if your network adds it for you. Needs `AGENT_REFEREE_TEAM_MEMBER`. |
+| `AGENT_REFEREE_ACCEPT_TERMS` | none | Planned; leave it unset until the service asks for it. The Terms version **you, the owner,** have read and accept (like `v2026-11-01`). Every request to the service then carries `x-accept-terms`, and `verify_receipt` shows the version a receipt records. Never let an agent set this for you. |
 
 ## Honest status
 

@@ -37,6 +37,20 @@ export function makeTeamFetch(team, serviceUrl, baseFetch = globalThis.fetch.bin
   };
 }
 
+/** A fetch that adds x-accept-terms (the owner's accepted Terms version) to requests under `serviceUrl` only, around
+ * whatever fetch it's given (a paying wrapper included, which keeps the header on its paid retry). Option A of the
+ * terms-binding spec; used only when the owner sets AGENT_REFEREE_ACCEPT_TERMS. */
+export function makeTermsFetch(version, serviceUrl, inner = globalThis.fetch.bind(globalThis)) {
+  const prefix = String(serviceUrl).replace(/\/+$/, "") + "/";
+  return (input, init = {}) => {
+    const href = typeof input === "string" ? input : input instanceof URL ? input.href : String(input?.url ?? "");
+    if (!href.startsWith(prefix)) return inner(input, init);
+    const headers = new Headers(init.headers ?? (typeof input === "object" && input?.headers ? input.headers : undefined));
+    headers.set("x-accept-terms", version);
+    return inner(input, { ...init, headers });
+  };
+}
+
 /** Team allowance errors, in words an agent can act on. `review`: the call was a review (it may have run). */
 function explainTeam(e, { review = false } = {}) {
   const check = review ? "check team_allowance and saved_receipts before retrying" : "try again in a minute";
@@ -175,7 +189,11 @@ function matchSummary(st, mySeat) {
  * @param {import("./store.mjs").Budget} deps.budget
  * @param {import("./store.mjs").ReceiptStore} deps.receipts
  */
-export function createTools({ config, makeClient, makePayingFetch, budget, receipts, baseFetch }) {
+export function createTools({ config, makeClient: makeClientRaw, makePayingFetch, budget, receipts, baseFetch }) {
+  // With the owner's accepted Terms version set, every client this server makes sends it to the service.
+  const makeClient = config.acceptTerms
+    ? (o = {}) => makeClientRaw({ ...o, fetch: makeTermsFetch(config.acceptTerms, o.url ?? config.url ?? DEFAULT_URL, o.fetch ?? baseFetch ?? globalThis.fetch.bind(globalThis)) })
+    : makeClientRaw;
   const pinned = config.publicKeys;
   const team = config.team ?? null;
   const teamClient = () => makeClient({ url: config.url, fetch: makeTeamFetch(team, config.url ?? DEFAULT_URL, baseFetch), publicKeys: pinned });
@@ -742,8 +760,10 @@ export function createTools({ config, makeClient, makePayingFetch, budget, recei
         if (args.pieces === undefined) notChecked.push("pieces (pass every piece, with its name and in order, to confirm the review is about the exact work you received)");
       } else if (args.output === undefined) notChecked.push("output (pass output to confirm the review is about the exact work you received)");
       const ok = problems.length === 0;
+      const termsRec = typeof p.terms_version === "string" ? { version: p.terms_version, sha256: typeof p.terms_sha256 === "string" ? p.terms_sha256 : null } : null;
       return {
-        summary: `${ok ? "Valid" : "NOT valid"} sealed review (${p.tier}): verdict ${p.result?.verdict}.${notChecked.length ? ` Not checked: ${notChecked.map((x) => x.split(" ")[0]).join(" and ")}.` : ""}`,
+        ...(termsRec ? { terms: termsRec } : {}),
+        summary: `${ok ? "Valid" : "NOT valid"} sealed review (${p.tier}): verdict ${p.result?.verdict}.${termsRec ? ` Paid under the Terms ${termsRec.version}.` : ""}${notChecked.length ? ` Not checked: ${notChecked.map((x) => x.split(" ")[0]).join(" and ")}.` : ""}`,
         kind: "review",
         ok,
         signature_valid: signed,
@@ -775,6 +795,7 @@ export function createTools({ config, makeClient, makePayingFetch, budget, recei
     if (humanReview === "required" && !trusts.some((t) => /person's review/.test(t)))
       trusts.push("The service marks this verdict for a person's review (human_review: required). Don't act on it in a step that can't be undone until someone has reviewed it.");
     return {
+      ...(typeof p.terms_version === "string" ? { terms: { version: p.terms_version, sha256: typeof p.terms_sha256 === "string" ? p.terms_sha256 : null } } : {}),
       summary: `${ok ? "Valid" : "NOT valid"} ${p.demo ? "DEMO " : ""}${p.tier} match receipt: ${out.picked_option !== undefined ? `picked "${out.picked_option}"` : `winner ${out.winner ?? "none"}`}${out.mistrial ? " (mistrial)" : ""}.${res.recomputed ? " The result was recomputed from the agents' own commitments and reveals." : ""}${humanReview === "required" ? " The verdict is advice: a person should review it before anyone acts on it (see advisory)." : ""}`,
       kind: "match",
       ok,

@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased (branch `terms-acceptance`, on top of 0.5.0)
+- **`AGENT_REFEREE_ACCEPT_TERMS`** (option A of the terms-binding spec; off by default): the owner's accepted Terms version, sent as `x-accept-terms` on every request to the service. It goes through any fetch the server uses, team and paying ones included (kept on the paid retry), and never to another host. Works with client 0.10, which doesn't know the option.
+- **`verify_receipt`** shows `terms` (version, sha256) when a review or match receipt records them.
+- Waits for the lawyer's choice between options A and B, and for the server side. Nothing is published.
+
 ## 0.5.0 (unreleased; release candidate on release-0.5.0-rc)
 
 ### Judge tiers without Claude (judge spec §9)

@@ -29,10 +29,13 @@ export function loadConfig(env = process.env) {
   const teamToken = env.AGENT_REFEREE_TEAM_TOKEN?.trim() || undefined;
   if (teamToken && !teamMember) throw new Error("AGENT_REFEREE_TEAM_TOKEN is set but AGENT_REFEREE_TEAM_MEMBER isn't: set the member name too.");
   if (teamMember && !/^[A-Za-z0-9._-]{1,32}$/.test(teamMember)) throw new Error("AGENT_REFEREE_TEAM_MEMBER must be 1 to 32 letters, digits, dots, dashes or underscores.");
+  const acceptTerms = env.AGENT_REFEREE_ACCEPT_TERMS?.trim() || undefined;
+  if (acceptTerms && !/^v\d{4}-\d{2}-\d{2}$/.test(acceptTerms)) throw new Error('AGENT_REFEREE_ACCEPT_TERMS must be the Terms version the owner accepted, like "v2026-11-01".');
   if (teamToken && !/^[\x21-\x7e]{32,512}$/.test(teamToken)) throw new Error("AGENT_REFEREE_TEAM_TOKEN must be 32 or more printable characters with no spaces.");
   return {
     url,
     team: teamMember ? { member: teamMember, token: teamToken } : undefined,
+    acceptTerms,
     privateKey: env.AGENT_REFEREE_PRIVATE_KEY?.trim() || undefined,
     dailyLimitMicro: toMicro(limit),
     publicKeys: [REFEREE_KEY, ...extraKeys.filter((k) => k !== REFEREE_KEY)],
