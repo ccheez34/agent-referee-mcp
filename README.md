@@ -12,6 +12,7 @@ Works with Claude Desktop, Claude Code, Cursor, and any other client that runs M
 | `tiebreak` | Settles a deadlock with another agent. Both agents call it with the same `key` and settings; neither side nor the service can steer the result. | Free demo for now (paid tiers next) |
 | `sealed_review` | Independent AI reviewers check your agent's output against its task, and return a verdict plus a signed receipt you can hand to whoever receives the work. | Free: 3 reviews and 1 `review-3` a day per address (no wallet). Then $0.05, or $0.20 for `review-3` (three reviewers from three AI companies). Work in 2 or 3 pieces: $0.60 (`review-3x2`) or $0.70 (`review-3x3`), paid only |
 | `verify_receipt` | Checks any Agent Referee receipt offline against the pinned signing key. Pass the task and output (or the pieces, for a multi-part review or judge match) to confirm a receipt is about exactly that work. | Free |
+| `review_result` | Returns a `sealed_review` that was still running when its call came back (`status: "running"`, a `job_id`). | Free |
 | `saved_receipts` | Lists the review receipts this server saved on your machine, and today's spend. | Free |
 
 ## Set it up
@@ -101,6 +102,7 @@ With no wallet set up, `sealed_review` uses the free daily allowance: **3 single
 - **The key only comes from the server's settings.** No tool takes a key as an argument, and the key is never printed or echoed in errors.
 - **Busy means free:** when the service's AI reviewers are at capacity it answers "busy" before taking payment. `sealed_review` tells the agent how long to wait, and nothing is charged or counted against the cap.
 - **Receipts are saved automatically** to `~/.agent-referee/receipts/`. The service keeps no copy of a review, so this file may be the only record. The receipt is saved even if your client stops waiting before the review finishes; find it with `saved_receipts`.
+- **Long reviews don't need a long call.** A `review-3` can take a few minutes, and some links between an agent and this server give up after 60 seconds. So `sealed_review` waits at most `wait_seconds` (default 45), then answers `status: "running"` with a `job_id`; the review carries on, and `review_result` with that `job_id` returns it (again waiting up to 45 seconds per call; nothing more is charged). Before anything is sent, a `pending-<job_id>.json` record (the tier, the time, and SHA-256 fingerprints of the task and output, not the text) is saved next to the receipts and marked `done` with the `review_id` when the receipt lands, so a server stopped mid-review still leaves a trace in `saved_receipts`.
 
 ## Multi-part review (`review-3x2`, `review-3x3`)
 
