@@ -457,8 +457,9 @@ export function createTools({ config, makeClient, makePayingFetch, budget, recei
     }
     if (job.status === "done") return { ...job.result, job_id: job.id, status: "done", ...(job.pendingProblem ? { pending_record_problem: job.pendingProblem } : {}) };
     if (job.status === "failed") {
-      if (job.error instanceof ToolError) throw job.error;
-      throw new ToolError(String(job.error?.message ?? job.error));
+      const also = job.pendingProblem ? ` (Also: ${job.pendingProblem})` : "";
+      if (job.error instanceof ToolError && !also) throw job.error;
+      throw new ToolError(`${String(job.error?.message ?? job.error)}${also}`, job.error instanceof ToolError ? job.error.details : undefined);
     }
     return {
       summary: `The ${job.tier} review is still running (started ${job.started_at}). Call review_result with job_id "${job.id}" in a little while; nothing more is charged. The receipt is saved to disk when it finishes.`,
@@ -489,7 +490,7 @@ export function createTools({ config, makeClient, makePayingFetch, budget, recei
       async (e) => {
         job.status = "failed";
         job.error = e;
-        if (job.sent) await savePending(job, args, { error: String(e?.message ?? e).slice(0, 500) });
+        if (job.sent) job.pendingProblem = await savePending(job, args, { error: String(e?.message ?? e).slice(0, 500) });
       },
     );
     jobs.set(job.id, job);
@@ -521,7 +522,7 @@ export function createTools({ config, makeClient, makePayingFetch, budget, recei
     if (!job) {
       const saved = await receipts.get(args.job_id).catch(() => null);
       if (saved) return { ...saved, summary: `That job isn't in this server's memory any more (the server restarted, or the job is old); its saved record is below.${saved.review_id ? ` The receipt is saved as review ${saved.review_id} (saved_receipts).` : ""}` };
-      throw new ToolError(`No review job ${args.job_id} on this server (it may have restarted). Check saved_receipts.`);
+      throw new ToolError(`No review job ${args.job_id} on this server (it may have restarted, or the job is old and receipt saving is off). Check saved_receipts.`);
     }
     return awaitJob(job, args.wait_seconds ?? DEFAULT_WAIT_S);
   }
@@ -565,8 +566,7 @@ export function createTools({ config, makeClient, makePayingFetch, budget, recei
     if (!n && args.free === true) return reviewResult(args, tier, await freeReview(args, tier, progress), null, []);
     if (team) return reviewResult(args, tier, await teamReview(args, tier, n, progress), null, [], true);
     if (!n && !config.privateKey) return reviewResult(args, tier, await freeReview(args, tier, progress), null, []);
-    if (!/^0x[0-9a-fA-F]{64}$/.test(config.privateKey))
-      throw new ToolError("AGENT_REFEREE_PRIVATE_KEY is set but isn't a 0x-prefixed 64-character hex key. The owner needs to fix it in the MCP server settings. Nothing was charged.");
+    // The key's format was checked in reviewPlan, before anything was saved or sent.
 
     let hold;
     try {

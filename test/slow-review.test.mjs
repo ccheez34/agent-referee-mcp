@@ -14,7 +14,7 @@ const TOKEN = "team-token-for-tests-" + "x".repeat(24);
 const vx = JSON.parse(readFileSync(new URL("./fixtures/multi-review-vectors.json", import.meta.url), "utf8"));
 const valid = vx.cases.find((c) => c.id === "valid-3x2");
 
-async function setup({ failPending = false, maxJobs } = {}) {
+async function setup({ failPending = false, failPendingAfter, maxJobs, team = true } = {}) {
   const dir = await tempDir();
   const gate = {};
   gate.wait = new Promise((resolve, reject) => {
@@ -23,15 +23,16 @@ async function setup({ failPending = false, maxJobs } = {}) {
   });
   const calls = [];
   const receipts = new ReceiptStore({ dir });
-  if (failPending) {
+  if (failPending || failPendingAfter !== undefined) {
     const save = receipts.save.bind(receipts);
+    let pendingSaves = 0;
     receipts.save = async (kind, id, record) => {
-      if (kind === "pending") throw new Error("EACCES: permission denied");
+      if (kind === "pending" && (failPending || ++pendingSaves > failPendingAfter)) throw new Error("EACCES: permission denied");
       return save(kind, id, record);
     };
   }
   const tools = createTools({
-    config: { publicKeys: [vx.public_key], dailyLimitMicro: 1_000_000, url: "https://example.invalid", team: { member: "T3", token: TOKEN }, ...(maxJobs ? { maxJobs } : {}) },
+    config: { publicKeys: [vx.public_key], dailyLimitMicro: 1_000_000, url: "https://example.invalid", ...(team ? { team: { member: "T3", token: TOKEN } } : {}), ...(maxJobs ? { maxJobs } : {}) },
     makeClient: () => ({
       _call: async (method, path, body) => {
         calls.push({ path, body });
@@ -141,6 +142,20 @@ test("finished jobs beyond the newest maxJobs are dropped from memory; review_re
   assert.equal(oldest.status, "done", "the saved pending record says done");
   assert.equal(oldest.review_id, valid.receipt.payload.review_id);
   assert.equal((await s.result({ job_id: ids[2] })).status, "done", "the newest is still in memory");
+});
+
+test("a failed job whose pending record can't be updated reports both", async () => {
+  const s = await setup({ failPendingAfter: 1 }); // the record before sending works; the update after the failure doesn't
+  const r = await s.review({ ...args, wait_seconds: 0 }, { progress: () => {} });
+  while (!s.calls.length) await new Promise((t) => setTimeout(t, 5));
+  s.gate.fail(new Error("socket hang up"));
+  await assert.rejects(s.result({ job_id: r.job_id, wait_seconds: 5 }), /Couldn't update the pending record/);
+});
+
+test("multi-part with no wallet and no team allowance is refused as paid only, not as a bad key (2nd review's finding checked)", async () => {
+  const s = await setup({ team: false });
+  await assert.rejects(s.review({ ...args, wait_seconds: 0 }, { progress: () => {} }), /paid only/);
+  assert.equal(s.calls.length, 0);
 });
 
 test("review_result: an unknown or mistyped job says where to look", async () => {

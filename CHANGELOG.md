@@ -6,6 +6,7 @@
 - **A pending record is saved before anything is sent** (`pending-<job_id>.json`: tier, time, task and output fingerprints, no text), marked `done` with the `review_id` when the receipt lands, or `failed` with the error.
 - Tests: `test/slow-review.test.mjs` (5); the e2e and team tests know the new tool and record. 67 of 67 against the server's main `df1ca4f`.
 - **After a review-3 of the change (Oct 31, 07:37, needs_changes 2-1; receipt 32d07c77…):** argument mistakes are now refused in the `sealed_review` call itself, even with `wait_seconds: 0` (they were reported as a running job); if the pending record can't be written before sending, nothing is sent or charged; finished jobs beyond the newest 100 are dropped from memory (`review_result` then reads the saved record); `review_result` takes any safe id and points a mistyped one to `saved_receipts`; a result's own fields can't overwrite `job_id` or `status`. 69 of 69 tests.
+- **After a second review-3 (07:41, needs_changes 2-1; receipt 8f1d2ce8…; it ran through the new "running" path):** a failed job whose pending record can't be updated reports both; the duplicate key-format check left in the send path is gone (it's checked before anything is saved or sent); clearer wording for a job that isn't in memory. 71 of 71 tests.
 ## Unreleased
 
 - **Team mode, for the operator's own sessions.** With `AGENT_REFEREE_TEAM_MEMBER` set (and
