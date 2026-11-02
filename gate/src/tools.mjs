@@ -1,6 +1,8 @@
 // The gate's tools. Who is calling comes from the gate's own settings (GATE_MEMBER, set by the owner per session's
 // entry), never from an argument, so a session can't act as another member.
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { createHash, randomBytes } from "node:crypto";
 import { ToolError } from "../../src/protocol.mjs";
 import { validate } from "../../src/validate.mjs";
 import { loadApprovalRecords, sortRecords, mismatch } from "./approvals.mjs";
@@ -9,10 +11,14 @@ import { normalizeSubject, receiptId, receiptProblem } from "./receipts.mjs";
 const HEX64 = /^[0-9a-f]{64}$/;
 const LOCK = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const day = (ms) => new Date(ms).toISOString().slice(0, 10);
+const sha256 = (t) => createHash("sha256").update(t, "utf8").digest("hex");
+export const CANARY_RUN_MINUTES = 15;
 
 export function createGateTools({ policy, state, member, approvalsSource, now = () => Date.now(), fetchImpl = fetch }) {
   if (!member || !/^[A-Za-z0-9._-]{1,40}$/.test(member)) throw new Error("GATE_MEMBER must name this session's member (letters, digits, . _ -), set by the owner.");
+  if (!policy.members.includes(member)) throw new Error(`GATE_MEMBER "${member}" isn't on the policy's members list, so this gate won't start.`);
   const skewMs = policy.clock_skew_seconds * 1000;
+  const maxLifeMs = policy.approval_max_hours * 3_600_000;
   const check = (args, schema) => {
     const problems = validate(args ?? {}, schema);
     if (problems.length) throw new ToolError(problems.join(" "));
@@ -33,11 +39,16 @@ export function createGateTools({ policy, state, member, approvalsSource, now = 
 
   async function checkAction(args) {
     check(args, actionSchema);
-    const req = { action: args.action, target: args.target, target_sha256: args.target_sha256 ?? null };
+    const req = { action: args.action, target: args.target, target_sha256: args.target_sha256 ?? null, member };
     const base = { action: req.action, target: req.target, member, policy_version: policy.version };
     if (policy.actions[req.action] === "open") {
       await state.log({ tool: "check_action", ...base, allowed: true, why: "open" });
       return { ...base, allowed: true, owner_only: false, summary: `"${req.action}" isn't owner-only under policy ${policy.version}.` };
+    }
+    const canaryProblem = await canaryStatus();
+    if (canaryProblem) {
+      await state.log({ tool: "check_action", ...base, allowed: false, why: "canary" }).catch(() => {});
+      return { ...base, allowed: false, owner_only: true, summary: `Not allowed: ${canaryProblem}` };
     }
     let records;
     try {
@@ -58,7 +69,7 @@ export function createGateTools({ policy, state, member, approvalsSource, now = 
     }
     const reasons = [];
     for (const a of approvals) {
-      const m = mismatch(a, req, { policyVersion: policy.version, now: now(), skewMs, revoked: remembered });
+      const m = mismatch(a, req, { policyVersion: policy.version, now: now(), skewMs, revoked: remembered, maxLifeMs });
       if (m === null) continue;
       if (m) {
         reasons.push(m);
@@ -262,12 +273,91 @@ export function createGateTools({ policy, state, member, approvalsSource, now = 
     });
   }
 
+  // ---------- canary (B2): this seat's sandbox must block a decoy secret and a blocked host ----------
+  /** Why this seat's owner-only steps wait for its canary, or null when the policy sets none or it passed recently. */
+  async function canaryStatus() {
+    if (!policy.canary) return null;
+    let failed, last;
+    try {
+      failed = await state.read(`canary-failed-${member}`);
+      last = await state.read(`canary-${member}`);
+    } catch {
+      return "the gate can't read this seat's canary record. Tell the owner.";
+    }
+    if (failed) return `this seat's canary failed at ${failed.at} (${failed.why}). Its sandbox reached something it must not, so owner-only steps wait until the owner fixes the sandbox and clears canary-failed-${member} in the gate's state folder.`;
+    if (!last?.passed) return "this seat has no passing canary yet. Run canary with step \"start\", try both things it names with your own tools, then canary with step \"report\".";
+    const t = Date.parse(last.at);
+    if (!Number.isFinite(t) || t > now() + skewMs) return "this seat's canary record has a bad time. Tell the owner.";
+    if (now() - t > policy.canary.max_age_hours * 3_600_000) return `this seat's canary passed at ${last.at}, more than ${policy.canary.max_age_hours} hours ago. Run it again.`;
+    return null;
+  }
+
+  const canarySchema = {
+    type: "object",
+    required: ["step"],
+    properties: {
+      step: { type: "string", enum: ["start", "report"], description: '"start" writes a fresh decoy and names what to try; "report" records what happened.' },
+      run_id: { type: "string", pattern: "^[0-9a-f]{24}$", description: "For report: the run_id that start returned." },
+      read: { type: "string", enum: ["failed", "succeeded"], description: "For report: did reading the decoy file with your own tools fail or succeed?" },
+      read_text: { type: "string", maxLength: 2000, description: "For report: whatever the read showed, error text included, copied as it was." },
+      fetch: { type: "string", enum: ["failed", "succeeded"], description: "For report: did fetching the blocked address fail or succeed?" },
+      fetch_detail: { type: "string", maxLength: 300, description: "For report: the error or status the fetch gave." },
+    },
+    additionalProperties: false,
+  };
+
+  async function canaryTool(args) {
+    check(args, canarySchema);
+    if (!policy.canary) throw new ToolError("This gate's policy sets no canary.");
+    const t = now();
+    if (args.step === "start") {
+      const runId = randomBytes(12).toString("hex");
+      const value = randomBytes(16).toString("hex");
+      const decoyPath = join(policy.canary.decoy_dir, `decoy-${member}.txt`);
+      try {
+        await writeFile(decoyPath, `AGENT-REFEREE-GATE-DECOY for seat ${member}\nDECOY_SECRET=${value}\nThis is a decoy, not a secret. If a session can read it, its sandbox reaches a folder it must not.\n`);
+      } catch (e) {
+        throw new ToolError(`The gate can't write the decoy (${String(e?.code ?? e?.message ?? e).slice(0, 60)}). The owner creates canary.decoy_dir.`);
+      }
+      // Only the value's hash is kept, so the state folder never holds the decoy itself.
+      await state.createOnce(`canary-run-${runId}`, { member, value_sha256: sha256(value), started_at: new Date(t).toISOString() });
+      await state.log({ tool: "canary", member, step: "start", run_id: runId });
+      return {
+        member,
+        run_id: runId,
+        decoy_path: decoyPath,
+        blocked_url: policy.canary.blocked_url,
+        report_by: new Date(t + CANARY_RUN_MINUTES * 60_000).toISOString(),
+        summary: `With your own tools (not this gate), try to read ${decoyPath} and to fetch ${policy.canary.blocked_url}. Both should fail. Then call canary with step "report", run_id ${runId}, what each attempt did, and the read's output as it was. Report within ${CANARY_RUN_MINUTES} minutes.`,
+      };
+    }
+    if (!args.run_id || !args.read || !args.fetch) throw new ToolError("A report needs run_id, read and fetch.");
+    const run = await state.read(`canary-run-${args.run_id}`);
+    if (!run || run.member !== member) throw new ToolError(`No canary run ${args.run_id} was started for this seat.`);
+    if (t - Date.parse(run.started_at) > CANARY_RUN_MINUTES * 60_000) throw new ToolError(`Canary run ${args.run_id} is older than ${CANARY_RUN_MINUTES} minutes. Start a new one.`);
+    const valueSeen = [...String(args.read_text ?? "").matchAll(/[0-9a-f]{32}/g)].some((m) => sha256(m[0]) === run.value_sha256);
+    const why = [];
+    if (args.read !== "failed") why.push("the decoy file could be read");
+    if (valueSeen) why.push("the report shows the decoy's value");
+    if (args.fetch !== "failed") why.push("the blocked address could be fetched");
+    const record = { member, run_id: args.run_id, at: new Date(t).toISOString(), passed: why.length === 0, read: args.read, fetch: args.fetch, value_seen: valueSeen, fetch_detail: args.fetch_detail?.slice(0, 300) ?? null, why: why.join("; ") || null };
+    if (!(await state.createOnce(`canary-report-${args.run_id}`, record))) throw new ToolError(`Canary run ${args.run_id} was already reported.`);
+    await state.writeAtomic(`canary-${member}`, record);
+    if (!record.passed) await state.createOnce(`canary-failed-${member}`, record);
+    await state.log({ tool: "canary", member, step: "report", run_id: args.run_id, passed: record.passed, why: record.why });
+    return {
+      ...record,
+      summary: record.passed
+        ? `Canary passed for ${member}: both attempts failed, as they should. Owner-only steps can be checked for ${policy.canary.max_age_hours} hours. The gate can't see your attempts; it records what you reported.`
+        : `Canary FAILED for ${member}: ${record.why}. Owner-only steps for this seat now wait until the owner fixes its sandbox and clears the record. Tell the owner.`,
+    };
+  }
   const NOT_APPROVAL = "A receipt can pass a quality step; it never stands in for the owner's yes.";
   return [
     {
       name: "check_action",
       title: "Is this step allowed?",
-      description: `Call right before any step on the policy's list (deploy, publish, payment, delete, secret, install, rule_change, …). Owner-only steps are allowed only by an approval the owner signed for this exact action and target, unexpired, unrevoked and not used up; an allowed call spends one use. ${NOT_APPROVAL} Policy ${policy.version}.`,
+      description: `Call right before any step on the policy's list (deploy, publish, payment, delete, secret, install, rule_change, …). Owner-only steps are allowed only by an approval the owner signed for this seat and this exact action and target, unexpired, unrevoked and unused; an allowed call uses it up${policy.canary ? ", and only while this seat's canary has passed recently" : ""}. ${NOT_APPROVAL} Policy ${policy.version}.`,
       inputSchema: actionSchema,
       annotations: { title: "Check an action", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
       handler: checkAction,
@@ -296,6 +386,18 @@ export function createGateTools({ policy, state, member, approvalsSource, now = 
       annotations: { title: "Release a lock", readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       handler: releaseLock,
     },
+    ...(policy.canary
+      ? [
+          {
+            name: "canary",
+            title: "Prove this seat's sandbox blocks a decoy and a blocked host",
+            description: `Step "start" writes a fresh decoy secret where no session should reach and names an address none should reach; try both with your own tools, then step "report" with what happened. Both must fail, or this seat's owner-only steps wait for the owner. Needed every ${policy.canary.max_age_hours} hours.`,
+            inputSchema: canarySchema,
+            annotations: { title: "Canary", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+            handler: canaryTool,
+          },
+        ]
+      : []),
     {
       name: "budget",
       title: "Today's budget, or reserve a spend",

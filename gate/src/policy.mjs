@@ -10,6 +10,9 @@ const canonicalKey = (k) => KEY.test(k) && Buffer.from(k, "base64").length === 3
 const SUBJECT_OF = { L0: "sha256", L1: "commit", L2: "sha256" };
 const NAME = /^[a-z][a-z0-9_]{0,39}$/;
 const HEX64 = /^[0-9a-f]{64}$/;
+const MEMBER = /^[A-Za-z0-9._-]{1,40}$/;
+// Fail closed (B2): a policy that leaves any of these out, or marks one "open", doesn't start the gate.
+export const BASELINE_OWNER_ONLY = ["deploy", "publish", "payment", "delete", "secret", "install", "rule_change"];
 
 export const sha256OfText = (text) => createHash("sha256").update(text, "utf8").digest("hex");
 
@@ -35,6 +38,30 @@ export function loadPolicy(text, pinnedSha256) {
       if (!NAME.test(name)) problems.push(`Action name "${name}" must be lower-case letters, digits and underscores.`);
       if (kind !== "owner_only" && kind !== "open") problems.push(`Action "${name}" must be "owner_only" or "open".`);
     }
+  if (actions) {
+    const loose = BASELINE_OWNER_ONLY.filter((a) => actions[a] !== "owner_only");
+    if (loose.length) problems.push(`These actions must be listed as "owner_only": ${loose.join(", ")}. The gate fails closed instead of starting with one left open or out.`);
+  }
+  const members = p.members;
+  if (!Array.isArray(members) || !members.length || !members.every((m) => typeof m === "string" && MEMBER.test(m)) || new Set(members).size !== members.length)
+    problems.push("members must list each seat's member name once (letters, digits, . _ -); a gate whose GATE_MEMBER isn't listed won't start.");
+  const maxHours = p.approval_max_hours ?? 24;
+  if (!Number.isInteger(maxHours) || maxHours < 1 || maxHours > 168) problems.push("approval_max_hours must be a whole number from 1 to 168: the longest an approval may last, issued to expiry.");
+  const canary = p.canary ?? null;
+  if (canary !== null) {
+    if (typeof canary !== "object") problems.push("canary must be an object, or left out.");
+    else {
+      if (typeof canary.decoy_dir !== "string" || !canary.decoy_dir.trim() || !/^(\/|[A-Za-z]:[\\/])/.test(canary.decoy_dir))
+        problems.push("canary.decoy_dir must be an absolute path: a folder no session should be able to read.");
+      let u = null;
+      try {
+        u = new URL(String(canary.blocked_url));
+      } catch {}
+      if (!u || u.protocol !== "https:") problems.push("canary.blocked_url must be an https address no session should be able to reach.");
+      const age = canary.max_age_hours ?? 24;
+      if (!Number.isInteger(age) || age < 1 || age > 168) problems.push("canary.max_age_hours must be a whole number from 1 to 168.");
+    }
+  }
   for (const field of ["approval_keys", "receipt_keys"]) {
     if (!Array.isArray(p[field]) || !p[field].length || !p[field].every(canonicalKey)) problems.push(`${field} must be a non-empty list of base64 Ed25519 public keys, each in its canonical spelling.`);
   }
@@ -84,6 +111,8 @@ export function loadPolicy(text, pinnedSha256) {
     ...p,
     sha256: actual,
     clock_skew_seconds: skew,
+    approval_max_hours: maxHours,
+    canary: canary ? { decoy_dir: canary.decoy_dir, blocked_url: canary.blocked_url, max_age_hours: canary.max_age_hours ?? 24 } : null,
     lock_stale_minutes: stale,
     done,
     budgets: { daily_usd: budgets.daily_usd ?? {}, default_daily_usd: budgets.default_daily_usd ?? 0 },

@@ -35,6 +35,7 @@ export function policyObject(over = {}) {
   return {
     format: POLICY_FORMAT,
     version: "test-1",
+    members: ["3.0", "5.0", "9.9", "__proto__", "constructor", "toString"],
     actions: { deploy: "owner_only", publish: "owner_only", payment: "owner_only", delete: "owner_only", secret: "owner_only", install: "owner_only", rule_change: "owner_only", merge: "open" },
     approval_keys: [owner.pub],
     receipt_keys: [referee.pub],
@@ -66,6 +67,7 @@ export function approval(over = {}, key = owner, envelopeKey) {
   const payload = {
     format: APPROVAL_FORMAT,
     type: "approval",
+    member: "3.0",
     action: "deploy",
     target: "agent-referee-server:production",
     target_sha256: "a".repeat(64),
@@ -154,5 +156,5 @@ export async function gate({ member = "3.0", records = [], policy = pinnedPolicy
   await state.init();
   const tools = createGateTools({ policy, state, member, approvalsSource: { file }, now });
   const call = (name, args) => tools.find((t) => t.name === name).handler(args, { progress() {} });
-  return { call, dir, file, state, setRecords: (r) => writeFile(file, JSON.stringify({ approvals: r })) };
+  return { call, names: tools.map((t) => t.name), dir, file, state, setRecords: (r) => writeFile(file, JSON.stringify({ approvals: r })) };
 }

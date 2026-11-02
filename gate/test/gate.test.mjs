@@ -80,17 +80,21 @@ test("a fitting approval allows once; a second use is refused", async () => {
   assert.match(second.reasons.join(" "), /used up/);
 });
 
-test("max_uses 3 allows exactly three", async () => {
+test("B2: an approval is used once: max_uses above 1 is rejected, and the one use can't be spent twice", async () => {
   const g = await gate({ records: [approval({ max_uses: 3 })] });
+  const r = await g.call("check_action", DEPLOY);
+  assert.equal(r.allowed, false);
+  assert.match(r.reasons.join(" "), /max_uses must be 1/);
+  const ok = await gate({ records: [approval()] });
   const out = [];
-  for (let i = 0; i < 4; i++) out.push((await g.call("check_action", DEPLOY)).allowed);
-  assert.deepEqual(out, [true, true, true, false]);
+  for (let i = 0; i < 3; i++) out.push((await ok.call("check_action", DEPLOY)).allowed);
+  assert.deepEqual(out, [true, false, false]);
 });
 
 test("two gate processes racing for a one-use approval: exactly one wins", async () => {
   const a = approval();
   const g1 = await gate({ records: [a] });
-  const g2 = await gate({ records: [a], dir: g1.dir, approvalsFile: g1.file, member: "5.0" });
+  const g2 = await gate({ records: [a], dir: g1.dir, approvalsFile: g1.file }); // a second process for the same seat
   const results = await Promise.all([g1.call("check_action", DEPLOY), g2.call("check_action", DEPLOY), g1.call("check_action", DEPLOY)]);
   assert.equal(results.filter((r) => r.allowed).length, 1);
 });
@@ -132,7 +136,7 @@ test("an approval made under another policy version is refused", async () => {
 });
 
 test("a revoked approval is refused, and stays refused after the revocation is removed from the record", async () => {
-  const a = approval({ max_uses: 5 });
+  const a = approval();
   const g = await gate({ records: [a, revocation(a.payload.nonce)] });
   assert.match((await g.call("check_action", DEPLOY)).reasons.join(" "), /revoked/);
   await g.setRecords([a]); // someone deletes the revocation from the record
@@ -399,7 +403,7 @@ test("F3: unprefixed ids can't pose as three companies; claude-* and anthropic/ 
 });
 
 test("F4: a revocation in the record counts even when the state folder can't be listed; an unreadable state fails closed", async () => {
-  const a = approval({ max_uses: 5 });
+  const a = approval();
   const g = await gate({ records: [a, revocation(a.payload.nonce)] });
   const realList = g.state.list.bind(g.state);
   g.state.list = async (prefix) => (prefix === "revoked-" ? [] : realList(prefix));
@@ -574,4 +578,150 @@ test("check command: exit 0 only when allowed (spending one use), 1 when not, 2 
   assert.equal(run("merge", "main").status, 0, "an open action");
   assert.equal(spawnSync(process.execPath, [bin, "check", "deploy", "x"], { env: { ...env, GATE_POLICY_SHA256: "0".repeat(64) }, encoding: "utf8" }).status, 2);
   assert.equal(spawnSync(process.execPath, [bin, "check"], { env, encoding: "utf8" }).status, 2);
+});
+
+// ---------------- B2: approvals name their seat; fail closed; a canary per seat ----------------
+
+test("B2: an approval for another seat is refused, even by a gate sharing the same state and record", async () => {
+  const a = approval({ member: "5.0" });
+  const mine = await gate({ records: [a] });
+  const r = await mine.call("check_action", DEPLOY);
+  assert.equal(r.allowed, false);
+  assert.match(r.reasons.join(" "), /for seat "5\.0", not this one/);
+  const theirs = await gate({ records: [a], dir: mine.dir, approvalsFile: mine.file, member: "5.0" });
+  assert.equal((await theirs.call("check_action", DEPLOY)).allowed, true);
+});
+
+test("B2: an approval with no seat, or in the old v1 format, is rejected; a v1 revocation still revokes", async () => {
+  const { member, ...noSeat } = approval().payload;
+  const v1 = approval({ format: "agent-referee-owner-approval-v1" });
+  const g = await gate({ records: [signDoc(noSeat, owner), v1] });
+  const r = await g.call("check_action", DEPLOY);
+  assert.equal(r.allowed, false);
+  assert.match(r.reasons.join(" "), /member \(the seat it's for\) is missing/);
+  assert.match(r.reasons.join(" "), /names no seat; the owner signs it again/);
+  const a = approval();
+  const oldRevocation = signDoc({ format: "agent-referee-owner-approval-v1", type: "revocation", nonce: a.payload.nonce, issued_at: iso(NOW - 1000) }, owner);
+  const g2 = await gate({ records: [a, oldRevocation] });
+  assert.match((await g2.call("check_action", DEPLOY)).reasons.join(" "), /revoked/);
+});
+
+test("B2: an approval lasting longer than approval_max_hours is refused (default 24)", async () => {
+  const long = approval({ expires_at: iso(NOW - 60_000 + 25 * 3_600_000) });
+  const g = await gate({ records: [long] });
+  assert.match((await g.call("check_action", DEPLOY)).reasons.join(" "), /lasts longer than the policy allows/);
+  const g48 = await gate({ records: [long], policy: pinnedPolicy({ approval_max_hours: 48 }) });
+  assert.equal((await g48.call("check_action", DEPLOY)).allowed, true);
+  for (const approval_max_hours of [0, 169, 1.5, "24"]) {
+    const text = JSON.stringify(policyObject({ approval_max_hours }));
+    assert.throws(() => loadPolicy(text, sha256OfText(text)), /approval_max_hours/);
+  }
+});
+
+test("B2 fail closed: a policy leaving a baseline action out or open, or listing no members, doesn't start", () => {
+  const base = policyObject();
+  const cases = [
+    { ...base, actions: { ...base.actions, deploy: "open" } },
+    { ...base, actions: Object.fromEntries(Object.entries(base.actions).filter(([k]) => k !== "secret")) },
+    { ...base, members: [] },
+    { ...base, members: undefined },
+    { ...base, members: ["3.0", "3.0"] },
+    { ...base, members: ["3.0", "a b"] },
+  ];
+  for (const p of cases) {
+    const text = JSON.stringify(p);
+    assert.throws(() => loadPolicy(text, sha256OfText(text)), /owner_only|members/);
+  }
+});
+
+test("B2 fail closed: a GATE_MEMBER the policy doesn't list doesn't start the gate", async () => {
+  await assert.rejects(gate({ member: "7.0" }), /isn't on the policy's members list/);
+  const dir = await mkdtemp(join(tmpdir(), "gate-cfg2-"));
+  const text = JSON.stringify(policyObject());
+  await writeFile(join(dir, "policy.json"), text);
+  const { buildGateTools } = await import("../src/server.mjs");
+  const env = { GATE_POLICY: join(dir, "policy.json"), GATE_POLICY_SHA256: sha256OfText(text), GATE_STATE_DIR: join(dir, "s"), GATE_APPROVALS_FILE: join(dir, "a.json") };
+  await assert.rejects(buildGateTools(await loadGateConfig({ ...env, GATE_MEMBER: "7.0" })), /members list/);
+  await assert.rejects(buildGateTools(await loadGateConfig(env)), /GATE_MEMBER/);
+});
+
+async function canaryGate({ records = [approval()], member = "3.0", age, nowRef = { t: NOW }, dir } = {}) {
+  const decoyDir = await mkdtemp(join(tmpdir(), "gate-decoy-"));
+  const policy = pinnedPolicy({ canary: { decoy_dir: decoyDir, blocked_url: "https://blocked.invalid/canary", ...(age ? { max_age_hours: age } : {}) } });
+  const g = await gate({ records, member, policy, now: () => nowRef.t, ...(dir ? { dir: dir.dir, approvalsFile: dir.file } : {}) });
+  return { ...g, decoyDir, nowRef };
+}
+const decoyValue = async (path) => (await (await import("node:fs/promises")).readFile(path, "utf8")).match(/DECOY_SECRET=([0-9a-f]{32})/)[1];
+
+test("canary: with one in the policy, owner-only steps wait for this seat's canary; open steps don't", async () => {
+  const g = await canaryGate();
+  assert.equal((await g.call("check_action", { action: "merge", target: "main" })).allowed, true);
+  const r = await g.call("check_action", DEPLOY);
+  assert.equal(r.allowed, false);
+  assert.match(r.summary, /no passing canary yet/);
+  assert.equal((await g.call("check_action", { ...DEPLOY, dry_run: true })).allowed, false);
+  assert.equal(g.names.includes("canary"), true);
+  const plain = await gate({ records: [approval()] });
+  assert.equal(plain.names.includes("canary"), false, "no canary in the policy: no canary tool, and no wait");
+  assert.equal((await plain.call("check_action", DEPLOY)).allowed, true);
+});
+
+test("canary: both attempts failing passes it; the approval then works; it lapses after max_age_hours", async () => {
+  const nowRef = { t: NOW };
+  const g = await canaryGate({ records: [approval({ expires_at: iso(NOW + 20 * 3_600_000) }), approval({ expires_at: iso(NOW + 20 * 3_600_000) })], age: 2, nowRef });
+  const s = await g.call("canary", { step: "start" });
+  assert.match(s.decoy_path, /decoy-3\.0\.txt$/);
+  assert.equal(s.blocked_url, "https://blocked.invalid/canary");
+  const rep = await g.call("canary", { step: "report", run_id: s.run_id, read: "failed", read_text: "EACCES: permission denied", fetch: "failed", fetch_detail: "ENOTFOUND" });
+  assert.equal(rep.passed, true, rep.summary);
+  assert.equal((await g.call("check_action", DEPLOY)).allowed, true);
+  nowRef.t = NOW + 2 * 3_600_000 + 1;
+  const late = await g.call("check_action", DEPLOY);
+  assert.equal(late.allowed, false);
+  assert.match(late.summary, /more than 2 hours ago/);
+});
+
+test("canary: a read or fetch that succeeded, or a report showing the decoy's value, fails it, and the failure sticks", async () => {
+  for (const bad of [{ read: "succeeded", fetch: "failed" }, { read: "failed", fetch: "succeeded" }, { read: "failed", fetch: "failed", showValue: true }]) {
+    const g = await canaryGate();
+    const s = await g.call("canary", { step: "start" });
+    const value = await decoyValue(s.decoy_path);
+    const rep = await g.call("canary", { step: "report", run_id: s.run_id, read: bad.read, fetch: bad.fetch, read_text: bad.showValue ? `file says DECOY_SECRET=${value}` : "denied" });
+    assert.equal(rep.passed, false, JSON.stringify(bad));
+    assert.match((await g.call("check_action", DEPLOY)).summary, /canary failed/);
+    // A later clean report doesn't clear it: only the owner does, after fixing the sandbox.
+    const s2 = await g.call("canary", { step: "start" });
+    assert.equal((await g.call("canary", { step: "report", run_id: s2.run_id, read: "failed", fetch: "failed" })).passed, true);
+    assert.match((await g.call("check_action", DEPLOY)).summary, /canary failed/);
+    assert.equal(await g.state.remove("canary-failed-3.0"), true);
+    assert.equal((await g.call("check_action", DEPLOY)).allowed, true);
+  }
+});
+
+test("canary: another seat's run, an old run, a second report or a missing field is refused; only the hash is kept", async () => {
+  const nowRef = { t: NOW };
+  const g = await canaryGate({ nowRef });
+  const s = await g.call("canary", { step: "start" });
+  const other = await canaryGate({ member: "5.0", nowRef, dir: g });
+  await assert.rejects(other.call("canary", { step: "report", run_id: s.run_id, read: "failed", fetch: "failed" }), /No canary run/);
+  await assert.rejects(g.call("canary", { step: "report", run_id: s.run_id, read: "failed" }), /needs run_id, read and fetch/);
+  await assert.rejects(g.call("canary", { step: "report", run_id: "0".repeat(24), read: "failed", fetch: "failed" }), /No canary run/);
+  const value = await decoyValue(s.decoy_path);
+  const { readdir, readFile } = await import("node:fs/promises");
+  const stateDir = join(g.dir, "state");
+  for (const f of await readdir(stateDir)) assert.equal((await readFile(join(stateDir, f), "utf8")).includes(value), false, f);
+  await g.call("canary", { step: "report", run_id: s.run_id, read: "failed", fetch: "failed" });
+  await assert.rejects(g.call("canary", { step: "report", run_id: s.run_id, read: "failed", fetch: "failed" }), /already reported/);
+  const s2 = await g.call("canary", { step: "start" });
+  nowRef.t = NOW + 16 * 60_000;
+  await assert.rejects(g.call("canary", { step: "report", run_id: s2.run_id, read: "failed", fetch: "failed" }), /older than 15 minutes/);
+});
+
+test("canary: a policy canary needs an absolute decoy folder and an https address; a missing folder refuses start", async () => {
+  for (const canary of [{ decoy_dir: "relative/dir", blocked_url: "https://x.invalid" }, { decoy_dir: "/abs", blocked_url: "http://x.invalid" }, { decoy_dir: "/abs", blocked_url: "https://x.invalid", max_age_hours: 0 }]) {
+    const text = JSON.stringify(policyObject({ canary }));
+    assert.throws(() => loadPolicy(text, sha256OfText(text)), /canary\./);
+  }
+  const g = await gate({ policy: pinnedPolicy({ canary: { decoy_dir: join(tmpdir(), `missing-${hex(6)}`), blocked_url: "https://x.invalid" } }) });
+  await assert.rejects(g.call("canary", { step: "start" }), /can't write the decoy/);
 });
