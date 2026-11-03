@@ -39,6 +39,7 @@ function shapeProblem(p) {
 export async function loadApprovalRecords({ file, url, fetchImpl = fetch, readText }) {
   let data;
   if (url) {
+    if (!/^https:\/\//i.test(url)) throw new Error("The approvals record's address must be https."); // the settings check this too; both fail closed
     const res = await fetchImpl(url, { headers: { accept: "application/json" }, redirect: "error", signal: AbortSignal.timeout(10_000) });
     if (!res.ok) throw new Error(`The approvals record answered ${res.status}.`);
     data = await res.json();

@@ -772,19 +772,58 @@ test("canary: one open run per seat: a second start within 15 minutes is refused
   await assert.rejects(g.call("canary", { step: "report", run_id: s2.run_id, read: "failed", fetch: "failed" }), /older than 15 minutes/);
 });
 
-test("canary: a failing report is recorded as sticking before the seat's status, so a crash between the two leaves the seat blocked", async () => {
+test("canary: a failing report is recorded as sticking before the report record and the seat's status, so a crash at either later write leaves the seat blocked", async () => {
+  for (const crashAt of ["canary-status-3.0", "canary-report-"]) {
+    const g = await canaryGate();
+    const s = await g.call("canary", { step: "start" });
+    const realWrite = g.state.writeAtomic.bind(g.state);
+    const realOnce = g.state.createOnce.bind(g.state);
+    g.state.writeAtomic = async (name, record) => {
+      if (name === crashAt) throw new Error("disk full");
+      return realWrite(name, record);
+    };
+    g.state.createOnce = async (name, record) => {
+      if (name.startsWith(crashAt) && crashAt.endsWith("-")) throw new Error("disk full");
+      return realOnce(name, record);
+    };
+    await assert.rejects(g.call("canary", { step: "report", run_id: s.run_id, read: "succeeded", read_text: "the file", fetch: "failed" }), /disk full/);
+    g.state.writeAtomic = realWrite;
+    g.state.createOnce = realOnce;
+    assert.match((await g.call("check_action", DEPLOY)).summary, /canary failed/, crashAt);
+    // Even a later clean run doesn't clear it.
+    const s2 = await g.call("canary", { step: "start" }).catch(() => null); // refused while the first run is open and unreported
+    if (s2) assert.equal((await g.call("canary", { step: "report", run_id: s2.run_id, read: "failed", fetch: "failed" })).passed, true);
+    assert.match((await g.call("check_action", DEPLOY)).summary, /canary failed/, crashAt);
+  }
+});
+
+test("canary: two starts at once can't both open a run; a report echoing the value in upper case is seen", async () => {
   const g = await canaryGate();
-  const s = await g.call("canary", { step: "start" });
-  const real = g.state.writeAtomic.bind(g.state);
-  g.state.writeAtomic = async (name, record) => {
-    if (name === "canary-3.0") throw new Error("disk full");
-    return real(name, record);
-  };
-  await assert.rejects(g.call("canary", { step: "report", run_id: s.run_id, read: "succeeded", read_text: "the file", fetch: "failed" }), /disk full/);
-  g.state.writeAtomic = real;
-  const s2 = await g.call("canary", { step: "start" });
-  assert.equal((await g.call("canary", { step: "report", run_id: s2.run_id, read: "failed", fetch: "failed" })).passed, true);
-  assert.match((await g.call("check_action", DEPLOY)).summary, /canary failed/);
+  const results = await Promise.allSettled([g.call("canary", { step: "start" }), g.call("canary", { step: "start" }), g.call("canary", { step: "start" })]);
+  const ok = results.filter((r) => r.status === "fulfilled");
+  assert.equal(ok.length, 1, JSON.stringify(results.map((r) => r.status)));
+  for (const r of results.filter((r) => r.status === "rejected")) assert.match(String(r.reason?.message ?? r.reason), /still open/);
+  const s = ok[0].value;
+  const value = await decoyValue(s.decoy_path);
+  const rep = await g.call("canary", { step: "report", run_id: s.run_id, read: "failed", read_text: `DECOY_SECRET=${value.toUpperCase()}`, fetch: "failed" });
+  assert.equal(rep.passed, false);
+  assert.match(rep.why, /shows the decoy's value/);
+});
+
+test("canary: a seat named like another seat's failure key can't block it (distinct prefixes for status and failure)", async () => {
+  const policy = pinnedPolicy({ members: ["A", "failed-A"], canary: { decoy_dir: await mkdtemp(join(tmpdir(), "gate-decoy-")), blocked_url: "https://blocked.invalid/canary" } });
+  const other = await gate({ records: [approval({ member: "failed-A" })], member: "failed-A", policy });
+  const s = await other.call("canary", { step: "start" });
+  assert.equal((await other.call("canary", { step: "report", run_id: s.run_id, read: "failed", fetch: "failed" })).passed, true);
+  const a = await gate({ records: [approval({ member: "A" })], member: "A", policy, dir: other.dir, approvalsFile: other.file });
+  assert.match((await a.call("check_action", DEPLOY)).summary, /no passing canary yet/); // not "canary failed"
+});
+
+test("approvals: the loader itself refuses an address that isn't https, whatever the settings said", async () => {
+  const { loadApprovalRecords } = await import("../src/approvals.mjs");
+  let fetched = false;
+  await assert.rejects(loadApprovalRecords({ url: "http://approvals.invalid/approvals", fetchImpl: async () => ((fetched = true), { ok: true, json: async () => [] }) }), /must be https/);
+  assert.equal(fetched, false);
 });
 
 test("canary: a run record whose start time is unreadable is refused, like a late report", async () => {

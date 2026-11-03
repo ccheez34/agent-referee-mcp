@@ -287,8 +287,9 @@ export function createGateTools({ policy, state, member, approvalsSource, now = 
     if (!policy.canary) return null;
     let failed, last;
     try {
+      // Distinct prefixes for the status and the failure, so no member name can make one seat's status another's failure.
       failed = await state.read(`canary-failed-${member}`);
-      last = await state.read(`canary-${member}`);
+      last = await state.read(`canary-status-${member}`);
     } catch {
       return "the gate can't read this seat's canary record. Tell the owner.";
     }
@@ -314,9 +315,9 @@ export function createGateTools({ policy, state, member, approvalsSource, now = 
     additionalProperties: false,
   };
 
-  /** True if any 32-character window of a hex run in the text hashes to the decoy's value (the value may be glued to other hex). */
+  /** True if any 32-character window of a hex run in the text (case-folded) hashes to the decoy's value: the value may be glued to other hex or upper-cased. */
   const showsValue = (text, valueSha256) => {
-    for (const m of String(text ?? "").matchAll(/[0-9a-f]{32,}/g)) for (let i = 0; i + 32 <= m[0].length; i++) if (sha256(m[0].slice(i, i + 32)) === valueSha256) return true;
+    for (const m of String(text ?? "").toLowerCase().matchAll(/[0-9a-f]{32,}/g)) for (let i = 0; i + 32 <= m[0].length; i++) if (sha256(m[0].slice(i, i + 32)) === valueSha256) return true;
     return false;
   };
 
@@ -325,30 +326,33 @@ export function createGateTools({ policy, state, member, approvalsSource, now = 
     if (!policy.canary) throw new ToolError("This gate's policy sets no canary.");
     const t = now();
     if (args.step === "start") {
-      // One open run per seat: a second start would overwrite the decoy while the first run can still be reported.
-      const open = await state.read(`canary-open-${member}`);
-      if (open && !(await state.exists(`canary-report-${open.run_id}`)) && t - Date.parse(open.started_at) <= CANARY_RUN_MINUTES * 60_000)
-        throw new ToolError(`Canary run ${open.run_id} for this seat is still open. Report it, or wait until ${new Date(Date.parse(open.started_at) + CANARY_RUN_MINUTES * 60_000).toISOString()}.`);
-      const runId = randomBytes(12).toString("hex");
-      const value = randomBytes(16).toString("hex");
-      const decoyPath = join(policy.canary.decoy_dir, `decoy-${member}.txt`);
-      try {
-        await writeFile(decoyPath, `AGENT-REFEREE-GATE-DECOY for seat ${member}\nDECOY_SECRET=${value}\nThis is a decoy, not a secret. If a session can read it, its sandbox reaches a folder it must not.\n`);
-      } catch (e) {
-        throw new ToolError(`The gate can't write the decoy (${String(e?.code ?? e?.message ?? e).slice(0, 60)}). The owner creates canary.decoy_dir.`);
-      }
-      // Only the value's hash is kept, so the state folder never holds the decoy itself.
-      await state.createOnce(`canary-run-${runId}`, { member, value_sha256: sha256(value), started_at: new Date(t).toISOString() });
-      await state.writeAtomic(`canary-open-${member}`, { run_id: runId, started_at: new Date(t).toISOString() });
-      await state.log({ tool: "canary", member, step: "start", run_id: runId });
-      return {
-        member,
-        run_id: runId,
-        decoy_path: decoyPath,
-        blocked_url: policy.canary.blocked_url,
-        report_by: new Date(t + CANARY_RUN_MINUTES * 60_000).toISOString(),
-        summary: `With your own tools (not this gate), try to read ${decoyPath} and to fetch ${policy.canary.blocked_url}. Both should fail. Then call canary with step "report", run_id ${runId}, what each attempt did, and the read's output as it was. Report within ${CANARY_RUN_MINUTES} minutes.`,
-      };
+      // One open run per seat, under the seat's own mutex: two starts at once can't both pass the check below, and a
+      // second start would overwrite the decoy while the first run can still be reported.
+      return state.withMutex(`canary-start-${member}`, async () => {
+        const open = await state.read(`canary-open-${member}`);
+        if (open && !(await state.exists(`canary-report-${open.run_id}`)) && t - Date.parse(open.started_at) <= CANARY_RUN_MINUTES * 60_000)
+          throw new ToolError(`Canary run ${open.run_id} for this seat is still open. Report it, or wait until ${new Date(Date.parse(open.started_at) + CANARY_RUN_MINUTES * 60_000).toISOString()}.`);
+        const runId = randomBytes(12).toString("hex");
+        const value = randomBytes(16).toString("hex");
+        const decoyPath = join(policy.canary.decoy_dir, `decoy-${member}.txt`);
+        try {
+          await writeFile(decoyPath, `AGENT-REFEREE-GATE-DECOY for seat ${member}\nDECOY_SECRET=${value}\nThis is a decoy, not a secret. If a session can read it, its sandbox reaches a folder it must not.\n`);
+        } catch (e) {
+          throw new ToolError(`The gate can't write the decoy (${String(e?.code ?? e?.message ?? e).slice(0, 60)}). The owner creates canary.decoy_dir.`);
+        }
+        // Only the value's hash is kept, so the state folder never holds the decoy itself.
+        await state.createOnce(`canary-run-${runId}`, { member, value_sha256: sha256(value), started_at: new Date(t).toISOString() });
+        await state.writeAtomic(`canary-open-${member}`, { run_id: runId, started_at: new Date(t).toISOString() });
+        await state.log({ tool: "canary", member, step: "start", run_id: runId });
+        return {
+          member,
+          run_id: runId,
+          decoy_path: decoyPath,
+          blocked_url: policy.canary.blocked_url,
+          report_by: new Date(t + CANARY_RUN_MINUTES * 60_000).toISOString(),
+          summary: `With your own tools (not this gate), try to read ${decoyPath} and to fetch ${policy.canary.blocked_url}. Both should fail. Then call canary with step "report", run_id ${runId}, what each attempt did, and the read's output as it was. Report within ${CANARY_RUN_MINUTES} minutes.`,
+        };
+      });
     }
     if (!args.run_id || !args.read || !args.fetch) throw new ToolError("A report needs run_id, read and fetch.");
     const run = await state.read(`canary-run-${args.run_id}`);
@@ -362,10 +366,11 @@ export function createGateTools({ policy, state, member, approvalsSource, now = 
     if (valueSeen) why.push("the report shows the decoy's value");
     if (args.fetch !== "failed") why.push("the blocked address could be fetched");
     const record = { member, run_id: args.run_id, at: new Date(t).toISOString(), passed: why.length === 0, read: args.read, fetch: args.fetch, value_seen: valueSeen, why: why.join("; ") || null };
-    if (!(await state.createOnce(`canary-report-${args.run_id}`, record))) throw new ToolError(`Canary run ${args.run_id} was already reported.`);
-    // The sticking failure is written before the seat's status, so a crash between the two leaves the seat blocked, not open.
+    // The sticking failure is written first, before the report record and the seat's status: a crash at any later
+    // point leaves the seat blocked, never open, and never with a failure that can't be reported again.
     if (!record.passed) await state.createOnce(`canary-failed-${member}`, record);
-    await state.writeAtomic(`canary-${member}`, record);
+    if (!(await state.createOnce(`canary-report-${args.run_id}`, record))) throw new ToolError(`Canary run ${args.run_id} was already reported.`);
+    await state.writeAtomic(`canary-status-${member}`, record);
     await state.log({ tool: "canary", member, step: "report", run_id: args.run_id, passed: record.passed, why: record.why });
     return {
       ...record,
