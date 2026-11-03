@@ -5,6 +5,7 @@
 // the kind, tier, judges and rules it agreed to. Runs the real server's match code (fake-service).
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
+import { join } from "node:path";
 import { tempDir, inProcess } from "./helpers.mjs";
 import { startFakeService, serverAvailable } from "./fake-service.mjs";
 import { createServer, loadConfig, buildTools } from "../src/server.mjs";
@@ -41,7 +42,7 @@ async function agent({ member = "3.0", extra = {} } = {}) {
     AGENT_REFEREE_TEAM_TOKEN: TOKEN,
     ...extra,
   });
-  const c = inProcess(createServer, { config, deps: { judgePollMs: 50 } });
+  const c = inProcess(createServer, { config, deps: { judgePollMs: 50, judgeMinuteMs: 2000 } });
   await c.init();
   return { ...c, dir };
 }
@@ -189,8 +190,83 @@ test("the allowance refuses the paid join (429): the opener is told, nothing is 
   assert.equal(h.isError, true, JSON.stringify(h.data ?? h.text).slice(0, 300));
   assert.match(h.text, /The paid join failed: .*doesn't fit your allowance today/);
   assert.match(h.text, /Nothing was used/);
-  assert.doesNotMatch(h.text, /basescan|refund list/);
-  assert.equal(g.isError === false ? g.data.status : "error", g.isError === false ? g.data.status : "error"); // the guest's call ended either way
+  assert.doesNotMatch(h.text, /basescan|refund list|may have been charged/);
+  assert.equal(h.data?.charge, "none");
+  const pend = await host.call("saved_receipts", { id: o.data.job_id });
+  assert.equal(pend.data.status, "failed");
+  assert.equal(pend.data.charge, "none");
+  assert.equal(pend.data.note, undefined, "the 'saved before anything was paid' note goes once the job ends");
+  // The guest's free seat was taken; with the host never seated, its call ends without a verdict and without a charge.
+  assert.ok(g.isError === true || ["running", "done"].includes(g.data?.status), JSON.stringify(g.data ?? g.text).slice(0, 200));
+  if (g.isError) assert.match(g.text, /Your seat is free/);
+});
+
+test("a lost answer after the paid join went through: the host is told the charge may have happened, the record says so, and no retry is advised", { skip }, async () => {
+  const host = await agent({ member: "3.0" });
+  const guest = await agent({ member: "5.0" });
+  const before = { ...svc.stats };
+  const o = await host.call("judge_match", openArgs({ invite_wait_minutes: 1 }));
+  assert.equal(o.isError, false, o.text);
+  svc.stats.dropNextTeamJoin = true;
+  const g = guest.call("judge_match", joinArgs(o.data.invite, { wait_seconds: 5 }));
+  const h = await host.call("judge_match", { action: "result", job_id: o.data.job_id, wait_seconds: 30 });
+  await g;
+  assert.equal(h.isError, true, JSON.stringify(h.data ?? h.text).slice(0, 300));
+  assert.match(h.text, /didn't get a clear answer/);
+  assert.match(h.text, /may have been charged to the team allowance/);
+  assert.match(h.text, /don't retry this open/);
+  assert.match(h.text, new RegExp(`GET /matches/${o.data.match_id}`));
+  assert.equal(h.data?.charge, "unclear");
+  assert.equal(h.data?.price, "$0.40");
+  assert.equal((svc.stats.teamSettled ?? 0) - (before.teamSettled ?? 0), 1, "the service did charge and seat the host");
+  const pend = await host.call("saved_receipts", { id: o.data.job_id });
+  assert.equal(pend.data.status, "failed");
+  assert.equal(pend.data.charge, "unclear");
+  assert.equal(svc.stats.dropNextTeamJoin, false);
+});
+
+test("an owner-approved match: one yes line pays for one match; with saved receipts off it isn't opened at all", { skip }, async () => {
+  const host = await agent({ member: "3.0" });
+  const guest = await agent({ member: "5.0" });
+  const line = "yes to run judge-2 the-lock-question 0123456789ab, $0.40 from the core pool";
+  const o = await host.call("judge_match", openArgs({ kind: "approved", dispute_message: undefined, approval: line, invite_wait_minutes: 1 }));
+  assert.equal(o.isError, false, o.text);
+  const again = await host.call("judge_match", openArgs({ kind: "approved", dispute_message: undefined, approval: `  ${line}  `, rules: RULES + " Rule 3: tie goes to alpha." }));
+  assert.equal(again.isError, true);
+  assert.match(again.text, new RegExp(`already used for match ${o.data.match_id}`));
+  assert.match(again.text, /approves matches one at a time/);
+  assert.match(again.text, /Nothing was charged/);
+  const rec = await host.call("saved_receipts", { id: o.data.kind.approval_sha256 });
+  assert.equal(rec.data.kind, "approval");
+  assert.equal(rec.data.approval, line);
+  assert.equal(rec.data.match_id, o.data.match_id);
+  // The same line is reusable by another server only if that server shares the receipts folder: a second entry with
+  // its own folder doesn't see it, which is why one core entry holds judge matches (PLAN-v1.5, B3).
+  const r2 = await guest.call("judge_match", openArgs({ kind: "approved", dispute_message: undefined, approval: line, invite_wait_minutes: 1 }));
+  assert.equal(r2.isError, false, "another entry's folder: not seen (by design; one entry for judge matches)");
+  const off = await agent({ member: "3.0", extra: { AGENT_REFEREE_SAVE_RECEIPTS: "false" } });
+  const r3 = await off.call("judge_match", openArgs({ kind: "approved", dispute_message: undefined, approval: "yes to one more" }));
+  assert.equal(r3.isError, true);
+  assert.match(r3.text, /needs saved receipts on/);
+  // Nobody joins any of them: nothing is charged.
+  for (const [a, j] of [[host, o.data.job_id], [guest, r2.data.job_id]]) {
+    const h = await a.call("judge_match", { action: "result", job_id: j, wait_seconds: 120 });
+    assert.match(h.text, /didn't join within 1 minutes\. Nothing was charged/);
+  }
+});
+
+test("the match title must fit the service's 200 characters: the marker plus the label is refused before anything is created", { skip }, async () => {
+  const host = await agent();
+  const before = { ...svc.stats };
+  const message = "m".repeat(160);
+  const r = await host.call("judge_match", openArgs({ dispute_message: message, title: "a label that pushes it over the line" }));
+  assert.equal(r.isError, true);
+  assert.match(r.text, /over the service's 200/);
+  assert.match(r.text, /Nothing was charged/);
+  const ok = await host.call("judge_match", openArgs({ dispute_message: message, invite_wait_minutes: 1 }));
+  assert.equal(ok.isError, false, ok.text);
+  assert.equal(ok.data.title.length, 178);
+  assert.equal(svc.stats.teamRequests.filter((x) => x.path.startsWith("/team/host/join")).length, before.teamRequests.filter((x) => x.path.startsWith("/team/host/join")).length);
 });
 
 test("the joiner takes the seat only for exactly what it agreed: kind, tier, judges and rules; an invite without a kind is refused", { skip }, async () => {
@@ -244,18 +320,25 @@ test("join and result: argument mistakes are refused", { skip }, async () => {
 
 // Stub service: covers what the real match code never does (judges in the receipt that differ from the named panel; a
 // receipt that names a paying wallet or another funding; a title without the kind; a forfeit).
-async function stubbed({ receiptPanel = PANEL2, result = { winner: "alpha" }, payload = {}, joinAnswer } = {}) {
+const { Seat: ClientSeat } = await import("agent-referee-client");
+const realSubmit = ClientSeat.prototype.submit;
+async function stubbed({ receiptPanel = PANEL2, result = { winner: "alpha" }, payload = {}, phase = "done", joinAnswer, minuteMs } = {}) {
   const { createTools } = await import("../src/tools.mjs");
   const { ReceiptStore, Budget } = await import("../src/store.mjs");
   const dir = await tempDir();
   const MID = "a".repeat(24);
   const title = `[rule 9 dispute: ${DISPUTE}]`;
-  const st = { phase: "done", result, check: { ok: true, problems: [] }, receipt: { payload: { tier: "judge-2", match_id: MID, title, paid_by: {}, proof: { judge: { panel: receiptPanel.map((model) => ({ model })) } }, ...payload } }, acks: [] };
+  const st = { phase, result, check: { ok: true, problems: [] }, receipt: { payload: { tier: "judge-2", match_id: MID, title, paid_by: {}, proof: { judge: { panel: receiptPanel.map((model) => ({ model })) } }, ...payload } }, acks: [], ...(phase === "error" ? { error: "the judges didn't answer" } : {}) };
   const calls = [];
+  const requested = new Map();
   const makeClient = (o) => ({
-    create: async (spec) => ({ match_id: MID, title: spec.title, invite: { url: "http://x/invite/" + MID + "?token=t" }, judge: { panel: PANEL2.map((model) => ({ model })) } }),
+    _requested: requested,
+    create: async (spec) => {
+      requested.set(MID, { tier: spec.tier, rules: spec.rules, seats: spec.seats, panel: spec.panel, host_pays: spec.hostPays });
+      return { match_id: MID, title: spec.title, invite: { url: "http://x/invite/" + MID + "?token=t" }, judge: { panel: PANEL2.map((model) => ({ model })) } };
+    },
     _call: async (method, path, body) => {
-      calls.push({ method, path, body, teamFetch: typeof o.fetch === "function" });
+      calls.push({ method, path, body, teamFetch: typeof o.fetch === "function", at: Date.now() });
       if (joinAnswer) throw joinAnswer;
       return { seat: body.seat, seat_token: "st", ack: null, team: { member_spent_today: "$0.40" } };
     },
@@ -267,12 +350,14 @@ async function stubbed({ receiptPanel = PANEL2, result = { winner: "alpha" }, pa
     budget: new Budget({ dir, dailyLimitMicro: 0 }),
     receipts: new ReceiptStore({ dir }),
     judgePollMs: 10,
+    ...(minuteMs ? { judgeMinuteMs: minuteMs } : {}),
   });
   const tool = tools.find((t) => t.name === "judge_match");
-  // The stub's Seat: submit() answers with the stubbed match state.
-  const { Seat } = await import("agent-referee-client");
-  Seat.prototype.submit = async () => st;
-  return { tool, dir, calls, ctx: { progress: () => {} } };
+  // The stub's Seat: submit() answers with the stubbed match state and records what the seat asked for.
+  const seen = {};
+  ClientSeat.prototype.submit = async function () { seen.requested = this.requested; return st; };
+  const restore = () => { ClientSeat.prototype.submit = realSubmit; };
+  return { tool, dir, calls, seen, requested, restore, ctx: { progress: () => {} } };
 }
 
 test("a receipt whose judges aren't the named panel, or that names a paying wallet, another funding or no kind, fails the check", async () => {
@@ -289,26 +374,72 @@ test("a receipt whose judges aren't the named panel, or that names a paying wall
     assert.match(r.check.problems.join(" "), re);
     assert.match(r.summary, /^WARNING/);
   }
-  const { tool, ctx, calls } = await stubbed();
+  {
+    const { tool, ctx, restore } = await stubbed({ payload: { title: "[rule 9 dispute: another message entirely]" } });
+    const o = await tool.handler(openArgs(), ctx);
+    const r = await tool.handler({ action: "result", job_id: o.job_id, wait_seconds: 5 }, ctx);
+    assert.equal(r.check.ok, false);
+    assert.match(r.check.problems.join(" "), /isn't the one this match was opened or joined with/);
+    restore();
+  }
+  const { tool, ctx, calls, seen, requested, restore } = await stubbed();
   const o = await tool.handler(openArgs(), ctx);
   const r = await tool.handler({ action: "result", job_id: o.job_id, wait_seconds: 5 }, ctx);
   assert.equal(r.check.ok, true, r.check.problems.join(" "));
   assert.deepEqual(calls.map((c) => c.path), ["/team/host/join/judge-2"], "the paid join goes through the team route");
   assert.equal(calls[0].teamFetch, true, "through the client whose fetch adds the team headers");
+  assert.deepEqual(seen.requested, requested.get("a".repeat(24)), "the host's seat carries what it asked for, so the client's own receipt check runs");
+  restore();
+});
+
+test("judging that ends without a verdict after the charge: the error says the seats are paid and the record keeps the charge", async () => {
+  const { tool, ctx, dir, restore } = await stubbed({ phase: "error" });
+  const o = await tool.handler(openArgs(), ctx);
+  await assert.rejects(tool.handler({ action: "result", job_id: o.job_id, wait_seconds: 5 }, ctx), (e) => /Your seats are paid \(\$0\.40 from the team allowance\), but The match ended without a verdict \(phase: error\)/.test(e.message) && /credited back/.test(e.message) && e.details?.charge === "charged" && e.details?.paid?.amount === "$0.40");
+  const { readFile } = await import("node:fs/promises");
+  const pend = JSON.parse(await readFile(join(dir, "receipts", `pending-${o.job_id}.json`), "utf8"));
+  assert.equal(pend.status, "failed");
+  assert.equal(pend.charge, "charged");
+  restore();
+});
+
+test("the invite wait is a time, not a count of answers: a service that answers 408 at once doesn't shorten it", async () => {
+  const { RefereeError } = await import("agent-referee-client");
+  const { tool, ctx, calls, restore } = await stubbed({ joinAnswer: new RefereeError("The other seat hasn't joined yet.", 408, {}), minuteMs: 150 });
+  const started = Date.now();
+  const o = await tool.handler(openArgs({ invite_wait_minutes: 2 }), ctx);
+  await assert.rejects(tool.handler({ action: "result", job_id: o.job_id, wait_seconds: 10 }, ctx), /didn't join within 2 minutes\. Nothing was charged/);
+  assert.ok(Date.now() - started >= 300, `waited ${Date.now() - started} ms`);
+  assert.ok(calls.length >= 2 && calls.length <= 4, `${calls.length} calls`);
+  restore();
+});
+
+test("a 404 on the team judge route is explained as the missing deploy, not as the allowance being off", async () => {
+  const { RefereeError } = await import("agent-referee-client");
+  const { tool, ctx, restore } = await stubbed({ joinAnswer: new RefereeError("No route: POST /team/host/join/judge-2", 404, {}) });
+  const o = await tool.handler(openArgs(), ctx);
+  await assert.rejects(tool.handler({ action: "result", job_id: o.job_id, wait_seconds: 5 }, ctx), (e) => /no team-paid judge route yet \(404/.test(e.message) && /Nothing was charged/.test(e.message) && e.details?.charge === "none");
+  restore();
 });
 
 test("a forfeit is reported as a forfeit, not as the judges' verdict", async () => {
-  const { tool, ctx } = await stubbed({ receiptPanel: [], result: { winner: "alpha", by_forfeit: true, forfeited: ["beta"] } });
+  const { tool, ctx, restore } = await stubbed({ receiptPanel: [], result: { winner: "alpha", by_forfeit: true, forfeited: ["beta"] } });
   const o = await tool.handler(openArgs(), ctx);
   const r = await tool.handler({ action: "result", job_id: o.job_id, wait_seconds: 5 }, ctx);
   assert.equal(r.by_forfeit, true);
   assert.equal(r.check.ok, true, r.check.problems.join(" "));
   assert.match(r.summary, /won by forfeit: the other side didn't submit in time, so no judge ran/);
+  restore();
 });
 
-test("a team refusal on the paid join is explained as the allowance's, never as a wallet's", async () => {
+test("a team refusal on the paid join is explained as the allowance's, never as a wallet's; a 5xx is an unclear charge", async () => {
   const { RefereeError } = await import("agent-referee-client");
-  const { tool, ctx } = await stubbed({ joinAnswer: new RefereeError("This judge-2 ($0.40 for both seats) doesn't fit your allowance today ($0.30 left; it resets at 00:00 UTC). Nothing was used.", 429, {}) });
-  const o = await tool.handler(openArgs(), ctx);
-  await assert.rejects(tool.handler({ action: "result", job_id: o.job_id, wait_seconds: 5 }, ctx), (e) => /The paid join failed: .*doesn't fit your allowance/.test(e.message) && /team_allowance/.test(e.message) && !/basescan|refund list/.test(e.message));
+  let { tool, ctx, restore } = await stubbed({ joinAnswer: new RefereeError("This judge-2 ($0.40 for both seats) doesn't fit your allowance today ($0.30 left; it resets at 00:00 UTC). Nothing was used.", 429, {}) });
+  let o = await tool.handler(openArgs(), ctx);
+  await assert.rejects(tool.handler({ action: "result", job_id: o.job_id, wait_seconds: 5 }, ctx), (e) => /The paid join failed: .*doesn't fit your allowance/.test(e.message) && /team_allowance/.test(e.message) && !/basescan|refund list|may have been charged/.test(e.message) && e.details?.charge === "none");
+  restore();
+  ({ tool, ctx, restore } = await stubbed({ joinAnswer: new RefereeError("Bad gateway", 502, {}) }));
+  o = await tool.handler(openArgs(), ctx);
+  await assert.rejects(tool.handler({ action: "result", job_id: o.job_id, wait_seconds: 5 }, ctx), (e) => /may have been charged to the team allowance/.test(e.message) && /don't retry this open/.test(e.message) && e.details?.charge === "unclear");
+  restore();
 });

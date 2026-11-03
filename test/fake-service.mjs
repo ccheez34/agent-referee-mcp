@@ -188,6 +188,12 @@ export async function startFakeService({ joinWaitSeconds = 15, reviewAnswer, tea
           if (r.status < 400) {
             teamSpent.set(member, (teamSpent.get(member) ?? 0) + price);
             stats.teamSettled = (stats.teamSettled ?? 0) + 1;
+            // A test switch: the charge went through and the seat is held, but the answer never reaches the client.
+            if (stats.dropNextTeamJoin) {
+              stats.dropNextTeamJoin = false;
+              req.socket.destroy();
+              return;
+            }
             return send(res, r.status, { ...r.body, team: teamView(member) });
           }
           return send(res, r.status, r.body);

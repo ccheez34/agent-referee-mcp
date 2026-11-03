@@ -177,7 +177,7 @@ function matchSummary(st, mySeat) {
  * @param {import("./store.mjs").Budget} deps.budget
  * @param {import("./store.mjs").ReceiptStore} deps.receipts
  */
-export function createTools({ config, makeClient, makePayingFetch, budget, receipts, baseFetch, judgePollMs }) {
+export function createTools({ config, makeClient, makePayingFetch, budget, receipts, baseFetch, judgePollMs, judgeMinuteMs }) {
   const pinned = config.publicKeys;
   const team = config.team ?? null;
   const teamClient = () => makeClient({ url: config.url, fetch: makeTeamFetch(team, config.url ?? DEFAULT_URL, baseFetch), publicKeys: pinned });
@@ -991,7 +991,7 @@ export function createTools({ config, makeClient, makePayingFetch, budget, recei
         ]
       : []),
     // judge_match: listed only when the owner switched it on (AGENT_REFEREE_JUDGE=on).
-    ...(config.judge && team ? [createJudgeTool({ config, pinned, makeClient, teamClient: () => makeClient({ url: config.url, fetch: makeTeamFetch(team, config.url ?? DEFAULT_URL, baseFetch), publicKeys: pinned, pollMs: judgePollMs ?? 2000 }), receipts, explain, explainTeam: (e) => explainTeam(e, { review: false }), ...(judgePollMs ? { pollMs: judgePollMs } : {}) })] : []),
+    ...(config.judge && team ? [createJudgeTool({ config, pinned, makeClient, teamClient: () => makeClient({ url: config.url, fetch: makeTeamFetch(team, config.url ?? DEFAULT_URL, baseFetch), publicKeys: pinned, pollMs: judgePollMs ?? 2000 }), receipts, explain, explainTeam: (e) => explainTeam(e, { review: false }), ...(judgePollMs ? { pollMs: judgePollMs } : {}), ...(judgeMinuteMs ? { minuteMs: judgeMinuteMs } : {}) })] : []),
   ];
 }
 

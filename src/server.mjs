@@ -62,10 +62,10 @@ export function loadConfig(env = process.env) {
 }
 
 /** Everything the server needs, with the outside world injectable for tests. */
-export function buildTools(config, { makeClient = (o) => new AgentReferee(o), makePayingFetch = defaultPayingFetch, now, baseFetch, judgePollMs } = {}) {
+export function buildTools(config, { makeClient = (o) => new AgentReferee(o), makePayingFetch = defaultPayingFetch, now, baseFetch, judgePollMs, judgeMinuteMs } = {}) {
   const budget = new Budget({ dir: config.dataDir, dailyLimitMicro: config.dailyLimitMicro, now });
   const receipts = new ReceiptStore({ dir: config.dataDir, enabled: config.saveReceipts });
-  return createTools({ config, makeClient, makePayingFetch, budget, receipts, baseFetch, judgePollMs });
+  return createTools({ config, makeClient, makePayingFetch, budget, receipts, baseFetch, judgePollMs, judgeMinuteMs });
 }
 
 export const SERVER_INFO = { name: "agent-referee", title: "Agent Referee", version: VERSION };

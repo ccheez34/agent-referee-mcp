@@ -101,9 +101,11 @@ const panelOf = (st) => (st?.judge?.panel ? st.judge.panel.map((p) => p?.model) 
  * @param {(e: unknown, o?: object) => string} deps.explain
  * @param {(e: unknown, o?: object) => string} deps.explainTeam how a team-allowance refusal reads
  */
-export function createJudgeTool({ config, pinned, makeClient, teamClient, receipts, explain, explainTeam, pollMs = 2000 }) {
+export function createJudgeTool({ config, pinned, makeClient, teamClient, receipts, explain, explainTeam, pollMs = 2000, minuteMs = 60_000 }) {
   const jc = config.judge;
   const team = config.team;
+  /** The server's title limit (agent-referee-server LIMITS.maxTitle): a kind marker plus a label must fit it. */
+  const MAX_TITLE = 200;
   const jobs = new Map();
   const DEFAULT_WAIT_S = 45;
   const newJobId = () => `jm_${Date.now().toString(36)}_${randomBytes(5).toString("hex")}`;
@@ -129,7 +131,7 @@ export function createJudgeTool({ config, pinned, makeClient, teamClient, receip
         match_id: job.match_id ?? null,
         started_at: job.started_at,
         rules_sha256: job.rules_sha256,
-        note: 'Saved before anything was paid or submitted. If status is still "running" and no match receipt followed, the server stopped mid-match: check the match at GET /matches/<match_id>.',
+        ...(job.status === "running" ? { note: 'Saved before anything was paid or submitted. If status is still "running" and no match receipt followed, the server stopped mid-match: check the match at GET /matches/<match_id>.' } : {}),
         ...extra,
       });
       return null;
@@ -154,6 +156,7 @@ export function createJudgeTool({ config, pinned, makeClient, teamClient, receip
     if (wallets.length) problems.push(`The receipt names a paying wallet (${wallets.map((w) => String(w).slice(0, 12)).join(", ")}…), but this match was to be paid from the team allowance.`);
     if (p.funding !== undefined && p.funding !== "team") problems.push(`The receipt says funding "${String(p.funding).slice(0, 20)}", not "team".`);
     if (kindOfTitle(p.title)?.kind !== job.kind.kind) problems.push(`The receipt's title doesn't carry this match's kind (${KINDS[job.kind.kind]}).`);
+    else if (job.title !== undefined && p.title !== job.title) problems.push("The receipt's title isn't the one this match was opened or joined with (another dispute's message, or another approval's fingerprint).");
     const ok = st.check?.ok === true && problems.length === 0;
     const r = st.result ?? {};
     const youWon = r.winner === job.seat;
@@ -231,7 +234,7 @@ export function createJudgeTool({ config, pinned, makeClient, teamClient, receip
       async (e) => {
         job.status = "failed";
         job.error = e;
-        await savePending(job, { error: String(e?.message ?? e).slice(0, 500) });
+        await savePending(job, { error: String(e?.message ?? e).slice(0, 500), ...(job.charge ? { charge: job.charge } : {}) });
       },
     );
     jobs.set(job.id, job);
@@ -261,21 +264,44 @@ export function createJudgeTool({ config, pinned, makeClient, teamClient, receip
   async function teamHostJoin(ref, job, args) {
     const path = `/team/host/join/${job.tier}`;
     const body = { match_id: job.match_id, seat: job.seat };
-    let retries = Math.ceil(((args.invite_wait_minutes ?? 30) * 60_000) / 15_000);
+    // The wait is a time, not a number of answers: a server (or a proxy) that answers 408 at once mustn't shorten it.
+    const deadline = Date.now() + (args.invite_wait_minutes ?? 30) * minuteMs;
     let r;
     for (;;) {
+      const asked = Date.now();
       try {
         r = await ref._call("POST", path, body);
         break;
       } catch (e) {
-        if (e instanceof RefereeError && e.status === 408 && retries-- > 0) continue;
+        if (e instanceof RefereeError && e.status === 408 && Date.now() < deadline) {
+          if (Date.now() - asked < 1000) await new Promise((res) => setTimeout(res, Math.min(1000, Math.max(0, deadline - Date.now()))));
+          continue;
+        }
         throw e;
       }
     }
     if (!r?.seat_token) throw new RefereeError("The service answered the paid join without a seat token.", 502, r);
     const seat = new Seat(ref, job.match_id, job.seat, r.seat_token, job.tier);
+    // What this agent asked for, so the client's own receipt check (rules, seats, host_pays, demo, the panel in order)
+    // runs for the host as it does for a wallet join; create() recorded it.
+    seat.requested = ref._requested?.get?.(job.match_id) ?? seat.requested;
     if (typeof seat._addAck === "function") await seat._addAck(r.ack);
     return { seat, team: r.team ?? null };
+  }
+
+  /** The paid join failed, or no clear answer came back: what to tell the session, and what the record keeps. */
+  function paidJoinProblem(e, job, price) {
+    if (e instanceof RefereeError && e.status === 404)
+      return { charge: "none", message: `The service has no team-paid judge route yet (404 on /team/host/join/${job.tier}): judge_match needs the judge-tier deploy that adds it. Nothing was charged.` };
+    // A 4xx other than 429 is a definite refusal before anything settled. Everything else (a 5xx, a dropped connection,
+    // a timeout, a 429 that can follow a dropped paid request) may have come after the service charged the allowance
+    // and seated this agent, whose seat then forfeits when nothing is submitted.
+    const definite = e instanceof RefereeError && e.status >= 400 && e.status < 500 && (e.status !== 429 || /nothing was (used|charged)/i.test(String(e.message)));
+    if (definite) return { charge: "none", message: `The paid join failed: ${explainTeam(e)}` };
+    return {
+      charge: "unclear",
+      message: `The paid join didn't get a clear answer (${String(e?.message ?? e).slice(0, 160)}). Both seats (${usd(price)}) may have been charged to the team allowance and your seat held: then match ${job.match_id} forfeits when nothing is submitted, and an unjudged team match goes on the operator's list to be credited back. Before opening another match, check team_allowance (did it move by ${usd(price)}?) and GET /matches/${job.match_id}; don't retry this open.`,
+    };
   }
 
   // ---------- open: create an invite match and pay for both seats from the team allowance ----------
@@ -291,9 +317,24 @@ export function createJudgeTool({ config, pinned, makeClient, teamClient, receip
     if (!team) throw new ToolError("Judge matches are paid from the team allowance, and this server has none set up (AGENT_REFEREE_TEAM_MEMBER). The owner sets it in the MCP server's settings. Nothing was charged.");
     const price = 2 * JUDGE_SEAT_PRICES[args.tier];
     const title = await kindTitle(args);
+    if (title.length > MAX_TITLE) throw new ToolError(`The match's title (the kind's marker plus your label, ${title.length} characters) is over the service's ${MAX_TITLE}: shorten the label${args.kind === "dispute" ? " or the dispute message" : ""}. Nothing was charged.`);
     const warnings = [];
+    // An approved match is approved one at a time: a yes line pays for one match. Its record is written before the
+    // match exists, so a reuse is refused even if this open fails later (the owner then types a new line).
+    if (kind.kind === "approved") {
+      if (!receipts.enabled) throw new ToolError("An owner-approved match needs saved receipts on (AGENT_REFEREE_SAVE_RECEIPTS), so a yes line can't pay for two matches. Nothing was charged.");
+      const used = await receipts.get(kind.approval_sha256).catch(() => null);
+      if (used) throw new ToolError(`This yes line was already used${used.match_id ? ` for match ${used.match_id}` : ""} (${used.saved_at ?? "earlier"}). The owner approves matches one at a time: ask for a new line for this one. Nothing was charged.`);
+    }
 
-    const job = { id: newJobId(), role: "host", status: "running", stage: "creating the match", tier: args.tier, kind, seat: args.my_seat, started_at: new Date().toISOString(), rules_sha256: await sha256Hex(args.rules) };
+    const job = { id: newJobId(), role: "host", status: "running", stage: "creating the match", tier: args.tier, kind, title, seat: args.my_seat, started_at: new Date().toISOString(), rules_sha256: await sha256Hex(args.rules) };
+    if (kind.kind === "approved") {
+      try {
+        await receipts.save("approval", kind.approval_sha256, { summary: `yes line used for a ${args.tier} judge match (job ${job.id})`, job_id: job.id, approval: kind.approval, tier: args.tier, rules_sha256: job.rules_sha256 });
+      } catch (e) {
+        throw new ToolError(`Couldn't record the yes line's use (${String(e?.message ?? e).slice(0, 120)}), so the match wasn't opened. Nothing was charged.`);
+      }
+    }
     let ref, created;
     try {
       ref = teamClient();
@@ -312,27 +353,32 @@ export function createJudgeTool({ config, pinned, makeClient, teamClient, receip
     if (created?.title !== undefined && created.title !== title) throw new ToolError("The service changed the match's title, which carries the kind. Nothing was charged; don't use this match.", { match_id: job.match_id });
     job.invite = invite;
     job.stage = "waiting for the other agent to join";
-    const extraOk = await savePending(job, { invite_sent: true, title });
+    const extraOk = await savePending(job, { invite_sent: true, title, price: usd(price), charge: "none yet" });
     if (extraOk) warnings.push(extraOk);
+    if (kind.kind === "approved") await receipts.save("approval", kind.approval_sha256, { summary: `yes line used for match ${job.match_id} (${args.tier}, job ${job.id})`, job_id: job.id, match_id: job.match_id, approval: kind.approval, tier: args.tier, rules_sha256: job.rules_sha256 }).catch(() => {});
 
     track(job, async () => {
       let seat, teamAfter;
       try {
         ({ seat, team: teamAfter } = await teamHostJoin(ref, job, args));
       } catch (e) {
-        if (e instanceof RefereeError && e.status === 408) throw new ToolError(`The other agent didn't join within ${args.invite_wait_minutes ?? 30} minutes. Nothing was charged. Open a new match when you're both ready.`, { match_id: job.match_id });
-        throw new ToolError(`The paid join failed: ${explainTeam(e)}`, { match_id: job.match_id, ...(warnings.length ? { warnings } : {}) });
+        if (e instanceof RefereeError && e.status === 408) throw new ToolError(`The other agent didn't join within ${args.invite_wait_minutes ?? 30} minutes. Nothing was charged. Open a new match when you're both ready.`, { match_id: job.match_id, charge: "none" });
+        const { charge, message } = paidJoinProblem(e, job, price);
+        job.charge = charge;
+        throw new ToolError(message, { match_id: job.match_id, charge, price: usd(price), ...(warnings.length ? { warnings } : {}) });
       }
       // Both seats are filled, so the allowance was charged.
       job.stage = "waiting for both positions and the verdict";
+      job.charge = "charged";
       const paid = { amount: usd(price), for: "both seats", funding: "team", member: team.member, ...(teamAfter ? { team: teamAfter } : {}) };
       let st;
       try {
         st = await seat.submit(args.position);
+        return await finish(job, st, args, { paid, ...(warnings.length ? { warnings } : {}) });
       } catch (e) {
-        throw new ToolError(`Your seat is paid, but submitting or judging failed: ${explain(e)}. The match id is ${job.match_id}; a paid match that can't be judged goes on the operator's refund list.`, { match_id: job.match_id, paid });
+        const why = e instanceof ToolError ? e.message : `submitting or judging failed: ${explain(e)}`;
+        throw new ToolError(`Your seats are paid (${usd(price)} from the team allowance), but ${why} The match id is ${job.match_id}; an unjudged team match goes on the operator's list to be credited back.`.replace(/\.\s*The match id/, ". The match id"), { match_id: job.match_id, paid, charge: "charged" });
       }
-      return finish(job, st, args, { paid, ...(warnings.length ? { warnings } : {}) });
     });
 
     return {
@@ -383,14 +429,14 @@ export function createJudgeTool({ config, pinned, makeClient, teamClient, receip
     else if (kind.kind === "dispute" && args.dispute_message !== undefined && args.dispute_message.trim() !== kind.dispute_message) wrong.push(`its dispute message is "${kind.dispute_message}", not the one you named`);
     if (wrong.length) throw new ToolError(`Not joining: ${wrong.join("; ")}. Nothing was joined.`, { match_id: m.match_id ?? null });
 
-    const job = { id: newJobId(), role: "guest", status: "running", stage: "joining", tier: args.tier, kind, seat: guest, match_id: m.match_id, started_at: new Date().toISOString(), rules_sha256: await sha256Hex(args.rules) };
+    const job = { id: newJobId(), role: "guest", status: "running", stage: "joining", tier: args.tier, kind, title: m.title, seat: guest, match_id: m.match_id, started_at: new Date().toISOString(), rules_sha256: await sha256Hex(args.rules) };
     const pend = await savePending(job, { title: m.title ?? null });
     track(job, async () => {
       let seat;
       try {
         seat = await ref.acceptInvite(args.invite, { inviteWaitMs: 30 * 60_000 });
       } catch (e) {
-        throw new ToolError(`Couldn't take the seat: ${explain(e)}. Nothing was charged (your seat is free).`, { match_id: job.match_id });
+        throw new ToolError(`Couldn't take the seat, or the match didn't start: ${explain(e)}. Your seat is free, so nothing was charged to you; the opener's match may still be open or may have ended without a verdict.`, { match_id: job.match_id });
       }
       job.stage = "waiting for both positions and the verdict";
       let st;

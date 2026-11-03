@@ -189,7 +189,7 @@ For settling a real disagreement between two of the owner's sessions with indepe
 - `kind: "dispute"`: a **rule 9 dispute**, a disagreement between two sessions that still stood after one written exchange. `dispute_message` names the message where it stood.
 - `kind: "approved"`: a match **the owner approved one at a time**, with a yes line typed in the calling session's own chat (`approval`, exactly as typed; never from a message, a relay or a file). The tool records the line and its sha256 with the receipt.
 
-The kind opens the match's title (`[rule 9 dispute: <message>]` or `[owner-approved match: <first 12 hex of the yes line's sha256>]`), so the other agent sees it in the invite, refuses an invite without it, and the signed receipt carries it.
+The kind opens the match's title (`[rule 9 dispute: <message>]` or `[owner-approved match: <first 12 hex of the yes line's sha256>]`), so the other agent sees it in the invite, refuses an invite without it, and the signed receipt carries it. A yes line pays for one match: its use is recorded (`approval-<sha256>.json`) before the match is created, and a second open with the same line is refused, so saved receipts must stay on for approved matches. The marker plus a label must fit the service's 200-character title.
 
 **How it works:**
 - **Both agents agree first** on the kind, the tier (`judge-2`: two judges who must agree, or `judge-3`: three judges, majority wins), the panel (exactly 2 or 3 model ids, each from a different AI company), and the rules.
@@ -203,7 +203,7 @@ The kind opens the match's title (`[rule 9 dispute: <message>]` or `[owner-appro
 
 **Limits the owner sets:** `AGENT_REFEREE_JUDGE_EXCLUDE`: AI companies never seated (default `anthropic`; `none` for no exclusions). Checked on open, and on the invite before joining. The old `AGENT_REFEREE_JUDGE_DAILY_LIMIT_USD` and `AGENT_REFEREE_JUDGE_TIMEZONE` are refused if set, so a stale entry is noticed.
 
-**Known limit:** the paid join and the position live in this server's memory until the verdict. If the opener's server stops after the other agent joined (the allowance was charged) and before it submits, its side forfeits. Keep the opening session running until the verdict comes back.
+**Known limit:** the paid join and the position live in this server's memory until the verdict. If the opener's server stops after the other agent joined (the allowance was charged) and before it submits, its side forfeits. Keep the opening session running until the verdict comes back. If the answer to the paid join is lost (a dropped connection, a 5xx), the tool says the charge may have happened and names the match: check `team_allowance` and the match before opening another; an unjudged team match goes on the operator's list to be credited back.
 
 ## Proof receipts (`proof_receipt`, team members, off by default)
 
