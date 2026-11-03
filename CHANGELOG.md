@@ -1,6 +1,8 @@
 # Changelog
 
-## 0.6.0 (unreleased; release candidate on release-0.6.0-rc, from release-0.5.0-rc 5935d81 with judge-match-b3, tiebreak-wording, proof-receipt-tool and gate-b2)
+## 0.6.0 (2026-11-03)
+
+From release-0.5.0-rc 5935d81 with judge-match-b3, tiebreak-wording, proof-receipt-tool and gate-b2; the branch `release-0.6.0-rc`.
 
 ### The gate, as its own server (`agent-referee-gate`, v0.2.1; branch gate-b2, `gate/`)
 - **A second bin, `agent-referee-gate`** (`gate/bin/agent-referee-gate.mjs`): the Agent Referee gate from rules-in-code part B, an MCP server (stdio) that binds one session, the seat, to its owner's rules: `check_action` (owner-only steps allowed only by an approval the owner signed for this seat and this exact action and target, format `agent-referee-owner-approval-v2`, used once, unexpired, unrevoked), `submit_done` (the receipts a kind of work requires, checked offline: pinned key, exact subject, level, freshness, no reuse), `take_lock` and `release_lock`, `budget`, and a `canary` per seat (a decoy secret and a blocked address that must both fail; a failure sticks until the owner clears it). Also a command form, `agent-referee-gate check <action> <target> [target_sha256] [--dry-run]`, for hooks that can't call an MCP tool (exit 0 allowed, 1 not, 2 can't run).
