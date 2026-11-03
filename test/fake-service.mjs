@@ -60,6 +60,7 @@ export async function startFakeService({ joinWaitSeconds = 15, reviewAnswer, tea
   // The team allowance stand-in (only when `team` is given): the real route's checks in the same order (token, then
   // member, then a member budget at list price), receipts with funding "team" and no payer, and the team block.
   const TEAM_PRICES = { review: 50_000, "review-3": 200_000 };
+  const JUDGE_TEAM_PRICES = { "judge-2": 400_000, "judge-3": 700_000 }; // both seats
   const teamSpent = new Map();
   const usdText = (m) => `$${(Math.max(0, m) / 1e6).toFixed(2)}`;
   const teamView = (member) => {
@@ -175,6 +176,22 @@ export async function startFakeService({ joinWaitSeconds = 15, reviewAnswer, tea
         const member = String(req.headers["x-team-member"] ?? "");
         if (!team.members.includes(member)) return send(res, 403, { error: "x-team-member must be one of the team's members (TEAM_MEMBERS)." });
         if (req.method === "GET" && path === "/team/allowance") return send(res, 200, { team: teamView(member), prices: { review: "$0.05", "review-3": "$0.20" } });
+        // The host's paid join of an invite judge match, both seats charged to the member's allowance (B3's contract:
+        // POST /team/host/join/<tier>, the body of /host/join/<tier>; 408 while the guest hasn't joined, nothing used).
+        if (req.method === "POST" && (m = path.match(/^\/team\/host\/join\/(judge-2|judge-3)$/))) {
+          if (!body || typeof body.match_id !== "string" || !ID_RE.test(body.match_id)) return send(res, 400, { error: "match_id is required." });
+          const price = JUDGE_TEAM_PRICES[m[1]];
+          const daily = team.budgets?.[member] ?? 8_000_000;
+          if ((teamSpent.get(member) ?? 0) + price > daily) return send(res, 429, { error: `This ${m[1]} (${usdText(price)} for both seats) doesn't fit your allowance today (${teamView(member).member_left_today} left; it resets at 00:00 UTC). Nothing was used.`, team: teamView(member) });
+          stats.teamHostJoins = (stats.teamHostJoins ?? 0) + 1;
+          const r = await forward(body.match_id, "join", { seat: body.seat, tier: m[1], role: "host", paid: true, payments_enabled: true, wait: true, payer: undefined });
+          if (r.status < 400) {
+            teamSpent.set(member, (teamSpent.get(member) ?? 0) + price);
+            stats.teamSettled = (stats.teamSettled ?? 0) + 1;
+            return send(res, r.status, { ...r.body, team: teamView(member) });
+          }
+          return send(res, r.status, r.body);
+        }
         const tier = path.slice("/team/".length);
         if (req.method !== "POST" || !TEAM_PRICES[tier]) return send(res, 404, { error: `No route: ${req.method} ${path}` });
         const v = review.validateReview(body, tier);

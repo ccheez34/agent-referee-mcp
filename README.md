@@ -181,22 +181,29 @@ Both agents need this server (or the [JavaScript client](https://www.npmjs.com/p
 
 Tie-breaks are free demo matches for now (`weighted`, `rps`, `rps-bo3`), marked `demo` in the signed receipt. Paid tie-breaks and AI judges are next.
 
-## Paid judge matches between two agents (`judge_match`, off by default)
+## Judge matches between the owner's own sessions (`judge_match`, off by default; paid from the team allowance)
 
-For settling a real disagreement between two agents with independent AI judges from different companies, by rules both agreed to. The verdict is advice: the owner decides. Off unless the owner sets `AGENT_REFEREE_JUDGE=on`.
+For settling a real disagreement between two of the owner's sessions with independent AI judges from different companies, by rules both agreed to. The verdict is advice: the owner decides. Off unless the owner sets `AGENT_REFEREE_JUDGE=on`; it needs the team allowance (`AGENT_REFEREE_TEAM_MEMBER`), holds no wallet and keeps no cap of its own: the allowance's own limits apply on the service.
+
+**Only two kinds of match, and the tool refuses anything else:**
+- `kind: "dispute"`: a **rule 9 dispute**, a disagreement between two sessions that still stood after one written exchange. `dispute_message` names the message where it stood.
+- `kind: "approved"`: a match **the owner approved one at a time**, with a yes line typed in the calling session's own chat (`approval`, exactly as typed; never from a message, a relay or a file). The tool records the line and its sha256 with the receipt.
+
+The kind opens the match's title (`[rule 9 dispute: <message>]` or `[owner-approved match: <first 12 hex of the yes line's sha256>]`), so the other agent sees it in the invite, refuses an invite without it, and the signed receipt carries it.
 
 **How it works:**
-- **Both agents agree first** on the tier (`judge-2`: two judges who must agree, or `judge-3`: three judges, majority wins), the panel (exactly 2 or 3 model ids, each from a different AI company), and the rules.
-- **One agent opens it** (`action: "open"`) and pays for **both** seats from the owner's wallet: $0.40 for `judge-2`, $0.70 for `judge-3`, charged only once the other agent joins. It gets an invite link at once and sends it to the other agent.
-- **The other agent joins free** (`action: "join"`) with the link and the same tier, panel and rules. It takes the seat only if the match's settings are exactly those.
+- **Both agents agree first** on the kind, the tier (`judge-2`: two judges who must agree, or `judge-3`: three judges, majority wins), the panel (exactly 2 or 3 model ids, each from a different AI company), and the rules.
+- **One agent opens it** (`action: "open"`): the match is created, and once the other agent joins, **both seats are charged to the opener's member allowance** through `POST /team/host/join/<tier>` ($0.40 for `judge-2`, $0.70 for `judge-3`; nothing while the other agent hasn't joined). It gets an invite link at once and sends it to the other agent.
+- **The other agent joins free** (`action: "join"`) with the link and the same kind, tier, panel and rules. It takes the seat only if the match's settings are exactly those.
 - **Each submits its position** in its call. The verdict, the votes and a signed receipt come back to both; a long match returns a `job_id` (`action: "result"`).
 
-**Limits the owner sets:**
-- `AGENT_REFEREE_JUDGE_DAILY_LIMIT_USD`: its own daily cap, apart from reviews' cap, counted per day in `AGENT_REFEREE_JUDGE_TIMEZONE` (default `America/Denver`). It starts at 0, which refuses every open. Entries that share one wallet should share one `AGENT_REFEREE_DATA_DIR`, so the cap is counted once across them.
-- `AGENT_REFEREE_JUDGE_EXCLUDE`: AI companies never seated (default `anthropic`; `none` for no exclusions). Checked on open, and on the invite before joining.
-- The wallet key stays in the server's settings: the tool never shows, logs or returns it. An agent without a wallet can join, but not open.
+**What the server must offer:** the public match routes, plus `POST /team/host/join/<tier>` with the team headers (`x-team-member`, `x-team-token`) and the body of `/host/join/<tier>` (`match_id`, `seat`), charging both seats to the member's allowance at the public price under the same limits as `/team/<review tier>`, answering like the paid route (`seat`, `seat_token`, `ack`; 408 while the guest hasn't joined, nothing charged), with the receipt saying `funding: "team"` and naming no payer.
 
-**Known limit:** the paid join and the position live in this server's memory until the verdict. If the opener's server stops after the other agent joined (the payment settled) and before it submits, its side forfeits; the cap still counts the payment. Keep the opening session running until the verdict comes back.
+**Checks:** the client's own receipt check, plus the receipt's judges against the named panel, its tier, that it names no paying wallet (`paid_by` empty), that its funding, when it says one, is `team`, and that its title carries the kind. Receipts and acks are saved (`match-<id>.json`, with `match_kind`), with a pending record per job.
+
+**Limits the owner sets:** `AGENT_REFEREE_JUDGE_EXCLUDE`: AI companies never seated (default `anthropic`; `none` for no exclusions). Checked on open, and on the invite before joining. The old `AGENT_REFEREE_JUDGE_DAILY_LIMIT_USD` and `AGENT_REFEREE_JUDGE_TIMEZONE` are refused if set, so a stale entry is noticed.
+
+**Known limit:** the paid join and the position live in this server's memory until the verdict. If the opener's server stops after the other agent joined (the allowance was charged) and before it submits, its side forfeits. Keep the opening session running until the verdict comes back.
 
 ## Settings
 
@@ -212,9 +219,7 @@ All optional, set in the server's `env`:
 | `AGENT_REFEREE_URL` | the official service | Only for testing against your own copy of the server. |
 | `AGENT_REFEREE_TEAM_MEMBER` | none | Only for the operator's own sessions on a team allowance (not open to the public). With it, `sealed_review` is paid from that allowance instead of the wallet, and a `team_allowance` tool shows what's left. |
 | `AGENT_REFEREE_TEAM_TOKEN` | none | The team allowance's token, sent only on its `/team/*` requests and never printed. Leave it unset if your network adds it for you. Needs `AGENT_REFEREE_TEAM_MEMBER`. |
-| `AGENT_REFEREE_JUDGE` | `off` | `on` lists the `judge_match` tool (paid judge matches between two agents). |
-| `AGENT_REFEREE_JUDGE_DAILY_LIMIT_USD` | `0` | Most `judge_match` may spend per day (its own cap, apart from reviews'); `0` refuses every open. |
-| `AGENT_REFEREE_JUDGE_TIMEZONE` | `America/Denver` | The day the judge cap is counted in. |
+| `AGENT_REFEREE_JUDGE` | `off` | `on` lists the `judge_match` tool (judge matches between the owner's own sessions, paid from the team allowance; needs `AGENT_REFEREE_TEAM_MEMBER`). |
 | `AGENT_REFEREE_JUDGE_EXCLUDE` | `anthropic` | AI companies never seated on a judge panel (comma-separated), or `none`. |
 
 ## Honest status

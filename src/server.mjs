@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { AgentReferee } from "agent-referee-client";
 import { createMcpServer, runStdio } from "./protocol.mjs";
 import { createTools, defaultPayingFetch } from "./tools.mjs";
-import { Budget, ReceiptStore, dayIn, toMicro } from "./store.mjs";
+import { Budget, ReceiptStore, toMicro } from "./store.mjs";
 
 export const VERSION = "0.5.0";
 
@@ -30,25 +30,20 @@ export function loadConfig(env = process.env) {
   if (teamToken && !teamMember) throw new Error("AGENT_REFEREE_TEAM_TOKEN is set but AGENT_REFEREE_TEAM_MEMBER isn't: set the member name too.");
   if (teamMember && !/^[A-Za-z0-9._-]{1,32}$/.test(teamMember)) throw new Error("AGENT_REFEREE_TEAM_MEMBER must be 1 to 32 letters, digits, dots, dashes or underscores.");
   if (teamToken && !/^[\x21-\x7e]{32,512}$/.test(teamToken)) throw new Error("AGENT_REFEREE_TEAM_TOKEN must be 32 or more printable characters with no spaces.");
-  // judge_match (paid judge matches between agents): off unless the owner switches it on, with its own daily cap.
+  // judge_match (judge matches between the owner's own sessions, paid from the team allowance): off unless the owner
+  // switches it on. It needs the team allowance; it holds no wallet and keeps no cap of its own (the allowance's
+  // limits apply on the service). The old wallet settings are refused, so a stale entry is noticed, not ignored.
   const judgeSwitch = (env.AGENT_REFEREE_JUDGE ?? "off").trim().toLowerCase();
   if (!["on", "off"].includes(judgeSwitch)) throw new Error('AGENT_REFEREE_JUDGE must be "on" or "off".');
   let judge;
   if (judgeSwitch === "on") {
-    const capRaw = env.AGENT_REFEREE_JUDGE_DAILY_LIMIT_USD ?? "0";
-    const cap = Number(capRaw);
-    if (!Number.isFinite(cap) || cap < 0 || cap > 100) throw new Error(`AGENT_REFEREE_JUDGE_DAILY_LIMIT_USD must be a dollar amount from 0 to 100 (got "${capRaw}").`);
+    if (!teamMember) throw new Error("AGENT_REFEREE_JUDGE=on needs the team allowance (AGENT_REFEREE_TEAM_MEMBER): judge matches are paid from it, never from a wallet.");
+    for (const old of ["AGENT_REFEREE_JUDGE_DAILY_LIMIT_USD", "AGENT_REFEREE_JUDGE_TIMEZONE"]) if (env[old] !== undefined) throw new Error(`${old} isn't used any more: judge matches are paid from the team allowance, whose limits the service enforces. Remove it from the entry.`);
     const ex = (env.AGENT_REFEREE_JUDGE_EXCLUDE ?? "anthropic").trim().toLowerCase();
     const exclude = ex === "none" ? [] : ex.split(",").map((s) => s.trim()).filter(Boolean);
     if (!exclude.length && ex !== "none") throw new Error('AGENT_REFEREE_JUDGE_EXCLUDE must list AI companies (e.g. "anthropic") or be "none".');
     if (exclude.some((c) => !/^[a-z0-9-]{1,40}$/.test(c))) throw new Error('AGENT_REFEREE_JUDGE_EXCLUDE must be company names like "anthropic,deepseek", or "none".');
-    const timeZone = env.AGENT_REFEREE_JUDGE_TIMEZONE?.trim() || "America/Denver";
-    try {
-      new Intl.DateTimeFormat("en-US", { timeZone });
-    } catch {
-      throw new Error(`AGENT_REFEREE_JUDGE_TIMEZONE must be a time zone name like "America/Denver" (got "${timeZone}").`);
-    }
-    judge = { dailyLimitMicro: toMicro(cap), exclude, timeZone };
+    judge = { exclude };
   }
   return {
     url,
@@ -66,12 +61,7 @@ export function loadConfig(env = process.env) {
 export function buildTools(config, { makeClient = (o) => new AgentReferee(o), makePayingFetch = defaultPayingFetch, now, baseFetch, judgePollMs } = {}) {
   const budget = new Budget({ dir: config.dataDir, dailyLimitMicro: config.dailyLimitMicro, now });
   const receipts = new ReceiptStore({ dir: config.dataDir, enabled: config.saveReceipts });
-  // Judge matches keep their own record and cap, counted per day in the owner's time zone. Every copy of the server
-  // that shares this data folder shares the cap.
-  const judgeBudget = config.judge
-    ? new Budget({ dir: config.dataDir, dailyLimitMicro: config.judge.dailyLimitMicro, now, name: "judge-spend", dayOf: dayIn(config.judge.timeZone), dayLabel: config.judge.timeZone, limitSetting: "AGENT_REFEREE_JUDGE_DAILY_LIMIT_USD" })
-    : undefined;
-  return createTools({ config, makeClient, makePayingFetch, budget, receipts, baseFetch, judgeBudget, judgePollMs });
+  return createTools({ config, makeClient, makePayingFetch, budget, receipts, baseFetch, judgePollMs });
 }
 
 export const SERVER_INFO = { name: "agent-referee", title: "Agent Referee", version: VERSION };
@@ -92,7 +82,7 @@ export async function main(env = process.env) {
     process.exit(1);
   }
   process.stderr.write(
-    `[agent-referee-mcp] ${VERSION} ready. Paid reviews: ${config.privateKey ? `on, daily cap $${(config.dailyLimitMicro / 1e6).toFixed(2)}` : `off (no AGENT_REFEREE_PRIVATE_KEY)${config.team ? "" : "; free reviews only"}`}. ${config.team ? `Team allowance: on, as member ${config.team.member} (${config.team.token ? "token from AGENT_REFEREE_TEAM_TOKEN" : "no token set here: the network must add x-team-token"}); sealed_review uses it instead of the wallet. ` : ""}${config.judge ? `Judge matches: on, daily cap $${(config.judge.dailyLimitMicro / 1e6).toFixed(2)} per ${config.judge.timeZone} day${config.privateKey ? "" : " (no wallet: this server can only join, not open)"}. ` : ""}Receipts: ${config.saveReceipts ? join(config.dataDir, "receipts") : "not saved"}.\n`,
+    `[agent-referee-mcp] ${VERSION} ready. Paid reviews: ${config.privateKey ? `on, daily cap $${(config.dailyLimitMicro / 1e6).toFixed(2)}` : `off (no AGENT_REFEREE_PRIVATE_KEY)${config.team ? "" : "; free reviews only"}`}. ${config.team ? `Team allowance: on, as member ${config.team.member} (${config.team.token ? "token from AGENT_REFEREE_TEAM_TOKEN" : "no token set here: the network must add x-team-token"}); sealed_review uses it instead of the wallet. ` : ""}${config.judge ? `Judge matches: on, paid from the team allowance (rule 9 disputes and owner-approved matches only). ` : ""}Receipts: ${config.saveReceipts ? join(config.dataDir, "receipts") : "not saved"}.\n`,
   );
   await runStdio({ info: SERVER_INFO, instructions: INSTRUCTIONS, tools: buildTools(config) });
 }

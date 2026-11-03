@@ -2,22 +2,15 @@
 
 ## 0.5.0 (unreleased; release candidate on release-0.5.0-rc)
 
-### Paid judge matches between agents (`judge_match`, off by default; branch judge-match-tool)
-- **New tool `judge_match`**, listed only with `AGENT_REFEREE_JUDGE=on`, for RULES v3 rule 9 as proposed (judge matches for disputes, from the wallet, up to a daily amount). Asked for in 5.0's 1433, point 2.
-- **The opener pays both seats** (an invite match: $0.40 for `judge-2`, $0.70 for `judge-3`), charged only once the other agent joins, within **its own daily cap** (`AGENT_REFEREE_JUDGE_DAILY_LIMIT_USD`, default 0) counted per day in `AGENT_REFEREE_JUDGE_TIMEZONE` (default `America/Denver`). The x402 payment is capped at that price. A definite refusal, or the other agent never joining, gives the reservation back; a dropped connection keeps it counted.
+### Judge matches between the owner's own sessions (`judge_match`, off by default; branch judge-match-b3, after judge-match-tool)
+- **New tool `judge_match`**, listed only with `AGENT_REFEREE_JUDGE=on`, for RULES rule 9 as PLAN-v1.5's B3 has it: judge matches paid from the **team allowance**, with no wallet and no key on any entry and no separate daily cap (the allowance's own limits apply on the service; his 16:49 Nov 1 removed the $4 limit).
+- **Only two kinds of match; anything else is refused:** a rule 9 dispute (`kind: "dispute"`, naming the message where the disagreement still stood after one written exchange), or a match the owner approved one at a time with a yes line typed in the calling session's own chat (`kind: "approved"`; the line and its sha256 are recorded with the receipt). The kind opens the match's title, so the joiner and the signed receipt carry it; an invite without it isn't joined.
+- **The opener pays both seats from its member allowance** through `POST /team/host/join/<tier>` (the team headers; the body of `/host/join/<tier>`; 408 while the guest hasn't joined, nothing charged): $0.40 for `judge-2`, $0.70 for `judge-3`. The server route is part of the Nov 5-9 judge-tier deploy.
 - **Only `judge-2` and `judge-3`, with a named panel:** exactly 2 or 3 model ids from different companies, none from `AGENT_REFEREE_JUDGE_EXCLUDE` (default `anthropic`).
-- **The joiner takes its free seat only for exactly what it agreed:** the same tier, judges and rules, not a demo, an invite match. Otherwise nothing is joined.
-- **Checks:** the client's own receipt check, plus the receipt's judges against the named panel and its tier. Receipts and acks are saved (`match-<id>.json`), with a pending record per job.
-- `Budget` takes a record name and a day function (`dayIn(timeZone)`); the reviews' cap is unchanged (`spend.json`, UTC day).
-- Tests: `test/judge-match.test.mjs` (10), against the server's own match code through the fake service (now with invite matches); 12 mutants, all caught. 84 of 84 against agent-referee-server main `cd6c569`.
-- **After a fresh read (4 findings fixed, each with a test and a mutant):**
-  - an unclear paid join (a 5xx, or a dropped connection whose recovery fails) now stays counted against the cap and says the payment may have gone through; only a 4xx gives the reservation back (it was released, with "Nothing was charged");
-  - a reservation still in flight at midnight counts in the new day until it's resolved, so a match opened at 23:55 and paid at 00:06 can't push the new day over its cap (this also applies to the reviews' cap, where the window is seconds);
-  - the spend record names the day it's counted in (`zone`), and a copy with a different time zone setting is refused instead of resetting the other's count;
-  - a forfeit is reported as a forfeit (no judge ran), not as the judges' verdict.
-  - Left as a known limit (README): the opener's side forfeits if its server stops between the payment and the submit.
-  - 89 of 89 tests.
-- **After the fresh reader's re-read:** an in-flight reservation is carried into a new day only while it could still settle (3 hours), so a reservation left by a server killed mid-call no longer cuts every later day's cap (it stays with its own day, as before); a 429 after a dropped paid request (it can come from the recovery call) stays counted; the time-zone refusal says how to recover after a deliberate change. 91 of 91 tests.
+- **The joiner takes its free seat only for exactly what it agreed:** the same kind, tier, judges and rules, not a demo, an invite match.
+- **Checks:** the client's own receipt check, plus the receipt's judges against the named panel, its tier, no paying wallet (`paid_by` empty), funding `team` when stated, and the kind in the title. Receipts and acks are saved (`match-<id>.json`, with `match_kind`), with a pending record per job.
+- `AGENT_REFEREE_JUDGE_DAILY_LIMIT_USD` and `AGENT_REFEREE_JUDGE_TIMEZONE` from the wallet version (judge-match-tool 2c860a2) are refused if set; `Budget`'s day function stays for the reviews' cap.
+- Tests: `test/judge-match.test.mjs` (12), against the server's own match code through the fake service (now with a team host-join route); 86 of 86 in the package's suites.
 
 ### Judge tiers without Claude (judge spec §9)
 - **verify_receipt** shows a judge receipt's own signed `advisory` sentence and `human_review` ("required"), adds both to `trusts`, and says in its summary that a person should review the verdict. They're read from the receipt itself, so they show with any installed client version.

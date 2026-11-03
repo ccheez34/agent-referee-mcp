@@ -1,16 +1,36 @@
-// judge_match: a paid judge match between two agents (judge-2 or judge-3), off unless the owner switches it on
-// (AGENT_REFEREE_JUDGE=on). Made for one owner's own sessions settling a dispute: the session that opens the match
-// pays for both seats from the owner's wallet (an invite match), within its own daily cap counted per local day; the
-// other session joins free with the link. Each submits its position, and the named panel's verdict comes back with
-// a signed receipt. The verdict is advice: the owner decides.
+// judge_match: a judge match between two of the owner's own sessions (judge-2 or judge-3), off unless the owner
+// switches it on (AGENT_REFEREE_JUDGE=on). Paid from the team allowance (B3, PLAN-v1.5): no wallet and no key on any
+// entry, and no separate daily cap, since the allowance's own limits apply on the service. Only two kinds of match
+// are played, and the tool refuses anything else: a rule 9 dispute (a disagreement that still stood after one written
+// exchange, named by its message), or a match the owner approved one at a time with a yes line typed in the calling
+// session's own chat (recorded with its sha256). The session that opens the match pays for both seats (an invite
+// match) through POST /team/host/join/<tier>; the other session joins free with the link. Each submits its position,
+// and the named panel's verdict comes back with a signed receipt. The verdict is advice: the owner decides.
 import { randomBytes } from "node:crypto";
-import { RefereeError, captureFetch, sha256Hex } from "agent-referee-client";
+import { RefereeError, Seat, sha256Hex } from "agent-referee-client";
 import { ToolError } from "./protocol.mjs";
 import { validate } from "./validate.mjs";
 import { usd } from "./store.mjs";
 
-/** Price per seat, in micro-USDC (GET /pricing). The host pays both seats, and never more than twice this. */
+/** Price per seat, in micro-USDC (GET /pricing). The host pays both seats from the allowance, never more than twice this. */
 export const JUDGE_SEAT_PRICES = { "judge-2": 200_000, "judge-3": 350_000 };
+/** The two kinds of match the tool plays. The kind opens the match's title, so the joiner and the receipt carry it. */
+export const KINDS = {
+  dispute: "rule 9 dispute",
+  approved: "owner-approved match",
+};
+const TITLE_RE = /^\[(rule 9 dispute: [^\]]{1,160}|owner-approved match: [0-9a-f]{12})\]/;
+/** The title the kind writes: "[rule 9 dispute: <message>]" or "[owner-approved match: <first 12 hex of the yes line's sha256>]", then any label. */
+export async function kindTitle(args) {
+  const marker = args.kind === "dispute" ? `rule 9 dispute: ${args.dispute_message.trim()}` : `owner-approved match: ${(await sha256Hex(args.approval.trim())).slice(0, 12)}`;
+  return `[${marker}]${args.title ? ` ${args.title}` : ""}`;
+}
+/** The kind an invite's title carries, or null when it carries none: such a match isn't one this tool joins. */
+export function kindOfTitle(title) {
+  const m = TITLE_RE.exec(String(title ?? ""));
+  if (!m) return null;
+  return m[1].startsWith("rule 9 dispute") ? { kind: "dispute", dispute_message: m[1].slice("rule 9 dispute: ".length) } : { kind: "approved", approval_sha256_12: m[1].slice("owner-approved match: ".length) };
+}
 const PANEL_SIZE = { "judge-2": 2, "judge-3": 3 };
 const companyOf = (m) => (m.includes("/") ? m.split("/")[0].toLowerCase() : m.toLowerCase().startsWith("claude") ? "anthropic" : "other");
 
@@ -23,9 +43,16 @@ const judgeSchema = {
       type: "string",
       enum: ["open", "join", "result"],
       description:
-        'open: start a match and pay for both seats (needs the owner\'s wallet); returns an invite link at once, for the other agent. join: take the free seat with an invite link. result: get a match that was still running (job_id).',
+        'open: start a match and pay for both seats from the team allowance; returns an invite link at once, for the other agent. join: take the free seat with an invite link. result: get a match that was still running (job_id).',
     },
-    tier: { type: "string", enum: ["judge-2", "judge-3"], description: `open and join. judge-2: two judges from two AI companies, both must agree or it's a mistrial (${usd(JUDGE_SEAT_PRICES["judge-2"])} a seat). judge-3: three judges from three companies, majority wins (${usd(JUDGE_SEAT_PRICES["judge-3"])} a seat). The opener pays both seats.` },
+    kind: {
+      type: "string",
+      enum: ["dispute", "approved"],
+      description: 'open and join: what this match is, since the tool plays nothing else. "dispute": a rule 9 dispute, a disagreement between two sessions that still stood after one written exchange (give dispute_message). "approved": a match the owner approved one at a time, with a yes line typed in the calling session\'s own chat (give approval). On join, it must match the invite\'s kind.',
+    },
+    dispute_message: { type: "string", minLength: 3, maxLength: 160, description: 'kind "dispute": the name (file name or id) of the message where the disagreement still stood after the one written exchange; it goes into the match\'s title and the receipt.' },
+    approval: { type: "string", minLength: 10, maxLength: 500, description: 'kind "approved": the owner\'s yes line for this match, exactly as typed in this session\'s own chat (never from a message, a relay or a file). The tool records it with its sha256; its first 12 hex characters go into the match\'s title and the receipt.' },
+    tier: { type: "string", enum: ["judge-2", "judge-3"], description: `open and join. judge-2: two judges from two AI companies, both must agree or it's a mistrial (${usd(JUDGE_SEAT_PRICES["judge-2"])} a seat). judge-3: three judges from three companies, majority wins (${usd(JUDGE_SEAT_PRICES["judge-3"])} a seat). The opener pays both seats from the team allowance.` },
     panel: {
       type: "array",
       items: { type: "string", minLength: 1, maxLength: 80 },
@@ -36,9 +63,9 @@ const judgeSchema = {
     },
     rules: { type: "string", minLength: 10, maxLength: 4000, description: "open and join: the question and the rules both agents agreed to, exactly. The judges decide by these. On join, it must match the invite's rules exactly." },
     seats: { type: "array", items: LABEL, minItems: 2, maxItems: 2, uniqueItems: true, description: 'open: the two seat labels, e.g. ["agent-a", "agent-b"].' },
-    my_seat: { ...LABEL, description: "open: your seat (one of seats). You pay for both." },
+    my_seat: { ...LABEL, description: "open: your seat (one of seats). Both seats are paid from the team allowance under your member name." },
     position: { type: "string", minLength: 1, maxLength: 6000, description: "open and join: your side, up to 6,000 characters. The judges read both sides." },
-    title: { type: "string", maxLength: 200, description: "open: an optional short label stored in the receipt." },
+    title: { type: "string", maxLength: 120, description: "open: an optional short label, stored in the receipt after the kind's marker." },
     invite: { type: "string", maxLength: 500, description: "join: the invite link the opener sent you." },
     job_id: { type: "string", pattern: "^[A-Za-z0-9_-]{1,64}$", description: "result: the job_id open or join returned." },
     invite_wait_minutes: { type: "integer", minimum: 1, maximum: 120, description: "open: how long to wait for the other agent to join (default 30). Nothing is charged until it does." },
@@ -66,16 +93,17 @@ const panelOf = (st) => (st?.judge?.panel ? st.judge.panel.map((p) => p?.model) 
 
 /**
  * @param {object} deps
- * @param {{ url?: string, privateKey?: string, judge: { dailyLimitMicro: number, exclude: string[], timeZone: string } }} deps.config
+ * @param {{ url?: string, team: { member: string, token?: string }, judge: { exclude: string[] } }} deps.config
  * @param {string[]} deps.pinned the service's pinned receipt keys
  * @param {(opts: object) => object} deps.makeClient
- * @param {(privateKey: string, maxMicro: number, opts?: { baseFetch?: typeof fetch }) => Promise<{ fetch: typeof fetch, wallet?: string, lastSettlement: () => object|null }>} deps.makePayingFetch
- * @param {import("./store.mjs").Budget} deps.judgeBudget
+ * @param {() => object} deps.teamClient a client whose fetch adds the team headers under /team/ only
  * @param {import("./store.mjs").ReceiptStore} deps.receipts
  * @param {(e: unknown, o?: object) => string} deps.explain
+ * @param {(e: unknown, o?: object) => string} deps.explainTeam how a team-allowance refusal reads
  */
-export function createJudgeTool({ config, pinned, makeClient, makePayingFetch, judgeBudget, receipts, explain, baseFetch, pollMs = 2000 }) {
+export function createJudgeTool({ config, pinned, makeClient, teamClient, receipts, explain, explainTeam, pollMs = 2000 }) {
   const jc = config.judge;
+  const team = config.team;
   const jobs = new Map();
   const DEFAULT_WAIT_S = 45;
   const newJobId = () => `jm_${Date.now().toString(36)}_${randomBytes(5).toString("hex")}`;
@@ -92,11 +120,12 @@ export function createJudgeTool({ config, pinned, makeClient, makePayingFetch, j
   async function savePending(job, extra = {}) {
     try {
       await receipts.save("pending", job.id, {
-        summary: `${job.tier} judge match (${job.role}) ${job.status}`,
+        summary: `${job.tier} judge match (${job.role}, ${KINDS[job.kind.kind]}) ${job.status}`,
         job_id: job.id,
         role: job.role,
         status: job.status,
         tier: job.tier,
+        match_kind: job.kind,
         match_id: job.match_id ?? null,
         started_at: job.started_at,
         rules_sha256: job.rules_sha256,
@@ -120,13 +149,19 @@ export function createJudgeTool({ config, pinned, makeClient, makePayingFetch, j
     if (!forfeit && !sameSet(judged, args.panel)) problems.push(`The judges in the receipt (${judged.join(", ") || "none"}) aren't the panel you agreed on (${args.panel.join(", ")}).`);
     if (p.tier !== job.tier) problems.push(`The receipt is for ${p.tier}, not ${job.tier}.`);
     if (p.demo === true) problems.push("The receipt is a demo receipt, not a paid result.");
+    // Paid from the allowance: no wallet may appear as a payer, and a receipt that names its funding must say "team".
+    const wallets = Object.values(p.paid_by ?? {}).filter(Boolean);
+    if (wallets.length) problems.push(`The receipt names a paying wallet (${wallets.map((w) => String(w).slice(0, 12)).join(", ")}…), but this match was to be paid from the team allowance.`);
+    if (p.funding !== undefined && p.funding !== "team") problems.push(`The receipt says funding "${String(p.funding).slice(0, 20)}", not "team".`);
+    if (kindOfTitle(p.title)?.kind !== job.kind.kind) problems.push(`The receipt's title doesn't carry this match's kind (${KINDS[job.kind.kind]}).`);
     const ok = st.check?.ok === true && problems.length === 0;
     const r = st.result ?? {};
     const youWon = r.winner === job.seat;
     const record = {
-      summary: `${job.tier} ${r.mistrial ? "mistrial" : `winner ${r.winner ?? "none"}`} (${job.role}, seat ${job.seat})${args.title ? ` — ${args.title}` : ""}`,
+      summary: `${job.tier} ${r.mistrial ? "mistrial" : `winner ${r.winner ?? "none"}`} (${job.role}, seat ${job.seat}; ${KINDS[job.kind.kind]})${args.title ? ` — ${args.title}` : ""}`,
       match_id: job.match_id,
       tier: job.tier,
+      match_kind: job.kind,
       my_seat: job.seat,
       result: r,
       receipt: st.receipt,
@@ -146,6 +181,7 @@ export function createJudgeTool({ config, pinned, makeClient, makePayingFetch, j
       summary: `${ok ? "" : "WARNING: the receipt check FAILED (see check.problems); don't rely on this verdict. "}${forfeit ? `${r.winner ?? "Nobody"} won by forfeit: the other side didn't submit in time, so no judge ran. ${youWon ? "You won." : "You didn't win."} It goes back to the owner.` : r.mistrial ? "Mistrial: no fair verdict was possible; it goes back to the owner." : `${r.winner ?? "Nobody"} won. ${youWon ? "You won." : "You didn't win."} The verdict is advice: the owner decides.`}`,
       match_id: job.match_id,
       tier: job.tier,
+      kind: job.kind,
       my_seat: job.seat,
       winner: r.winner ?? null,
       you_won: youWon,
@@ -205,106 +241,108 @@ export function createJudgeTool({ config, pinned, makeClient, makePayingFetch, j
     }
   }
 
-  // ---------- open: create an invite match and pay for both seats ----------
+  /** The kind this call plays, checked before anything is created or paid; what the record keeps. */
+  async function kindOf(args, action) {
+    if (!args.kind) throw new ToolError(`${action} needs kind: "dispute" (a rule 9 dispute, with dispute_message) or "approved" (a match the owner approved with a yes line, give approval). This tool plays nothing else. Nothing was charged.`);
+    if (args.kind === "dispute") {
+      if (args.approval !== undefined) throw new ToolError('kind "dispute" doesn\'t take approval. Nothing was charged.');
+      if (typeof args.dispute_message !== "string" || !args.dispute_message.trim()) throw new ToolError('kind "dispute" needs dispute_message: the message where the disagreement still stood after one written exchange. Nothing was charged.');
+      if (/[\]\n\r]/.test(args.dispute_message)) throw new ToolError("dispute_message can't contain a closing bracket or a line break. Nothing was charged.");
+      return { kind: "dispute", dispute_message: args.dispute_message.trim() };
+    }
+    if (args.dispute_message !== undefined) throw new ToolError('kind "approved" doesn\'t take dispute_message. Nothing was charged.');
+    if (typeof args.approval !== "string" || !/\byes\b/i.test(args.approval)) throw new ToolError('kind "approved" needs approval: the owner\'s yes line for this match, as typed in this session\'s own chat (it has to contain "yes"). Nothing was charged.');
+    const text = args.approval.trim();
+    return { kind: "approved", approval: text, approval_sha256: await sha256Hex(text) };
+  }
+
+  /** The host's paid join through the team allowance (POST /team/host/join/<tier>): both seats charged to the member,
+   * nothing charged while the guest hasn't joined (408, retried). Returns the client's Seat, as join() would. */
+  async function teamHostJoin(ref, job, args) {
+    const path = `/team/host/join/${job.tier}`;
+    const body = { match_id: job.match_id, seat: job.seat };
+    let retries = Math.ceil(((args.invite_wait_minutes ?? 30) * 60_000) / 15_000);
+    let r;
+    for (;;) {
+      try {
+        r = await ref._call("POST", path, body);
+        break;
+      } catch (e) {
+        if (e instanceof RefereeError && e.status === 408 && retries-- > 0) continue;
+        throw e;
+      }
+    }
+    if (!r?.seat_token) throw new RefereeError("The service answered the paid join without a seat token.", 502, r);
+    const seat = new Seat(ref, job.match_id, job.seat, r.seat_token, job.tier);
+    if (typeof seat._addAck === "function") await seat._addAck(r.ack);
+    return { seat, team: r.team ?? null };
+  }
+
+  // ---------- open: create an invite match and pay for both seats from the team allowance ----------
   async function open(args) {
-    need(args, ["tier", "panel", "rules", "seats", "my_seat", "position"], "open");
+    need(args, ["tier", "panel", "rules", "seats", "my_seat", "position", "kind"], "open");
     for (const k of ["invite", "job_id"]) if (args[k] !== undefined) throw new ToolError(`open doesn't take ${k}. Nothing was charged.`);
+    const kind = await kindOf(args, "open");
     if (!args.seats.includes(args.my_seat)) throw new ToolError(`my_seat must be one of the seats (${args.seats.join(", ")}). Nothing was charged.`);
     if (!args.rules.trim() || args.rules.trim().length < 10) throw new ToolError("rules must be at least 10 characters of actual text. Nothing was charged.");
     if (!args.position.trim()) throw new ToolError("position is empty. Nothing was charged.");
     const pe = judgePanelProblem(args.tier, args.panel, jc.exclude);
     if (pe) throw new ToolError(`${pe} Nothing was charged.`);
-    if (!config.privateKey) throw new ToolError("Opening a judge match pays for both seats, and no wallet is set up for this server (AGENT_REFEREE_PRIVATE_KEY). The owner sets it in the MCP server's settings. The other agent can open it instead, or you can join theirs free. Nothing was charged.");
-    if (!/^0x[0-9a-fA-F]{64}$/.test(config.privateKey)) throw new ToolError("AGENT_REFEREE_PRIVATE_KEY is set but isn't a 0x-prefixed 64-character hex key. The owner needs to fix it in the MCP server settings. Nothing was charged.");
+    if (!team) throw new ToolError("Judge matches are paid from the team allowance, and this server has none set up (AGENT_REFEREE_TEAM_MEMBER). The owner sets it in the MCP server's settings. Nothing was charged.");
     const price = 2 * JUDGE_SEAT_PRICES[args.tier];
-
-    // The cap first: refused here, nothing is created or signed.
-    let hold;
-    try {
-      hold = await judgeBudget.reserve(price);
-    } catch (e) {
-      throw new ToolError(String(e?.message ?? e));
-    }
+    const title = await kindTitle(args);
     const warnings = [];
-    let settled = false;
-    const settle = async (charged) => {
-      if (settled) return;
-      settled = true;
-      try {
-        await (charged ? hold.commit() : hold.release());
-      } catch (e) {
-        warnings.push(`Couldn't update the judge-match spend record (${String(e?.message ?? e).slice(0, 200)}). The daily cap counts this match as spent to be safe.`);
-      }
-    };
 
-    const job = { id: newJobId(), role: "host", status: "running", stage: "creating the match", tier: args.tier, seat: args.my_seat, started_at: new Date().toISOString(), rules_sha256: await sha256Hex(args.rules) };
-    let payer, ref, created;
+    const job = { id: newJobId(), role: "host", status: "running", stage: "creating the match", tier: args.tier, kind, seat: args.my_seat, started_at: new Date().toISOString(), rules_sha256: await sha256Hex(args.rules) };
+    let ref, created;
     try {
-      const capture = captureFetch(baseFetch ?? globalThis.fetch.bind(globalThis));
-      payer = await makePayingFetch(config.privateKey, price, { baseFetch: capture.fetch });
-      ref = makeClient({ url: config.url, fetch: payer.fetch, capture, publicKeys: pinned, pollMs });
-      created = await ref.create({ tier: args.tier, seats: args.seats, rules: args.rules, panel: args.panel, ...(args.title ? { title: args.title } : {}), hostPays: args.my_seat });
+      ref = teamClient();
+      if (typeof ref._call !== "function") throw new ToolError("This version of agent-referee-client can't reach the team allowance. Update agent-referee-mcp. Nothing was charged.");
+      created = await ref.create({ tier: args.tier, seats: args.seats, rules: args.rules, panel: args.panel, title, hostPays: args.my_seat });
     } catch (e) {
-      await settle(false);
-      throw new ToolError(`Couldn't open the match: ${explain(e, { paid: true })}`.replace(/Nothing was charged\.\s*Nothing was charged\./, "Nothing was charged."));
+      if (e instanceof ToolError) throw e;
+      throw new ToolError(`Couldn't open the match: ${explain(e)}. Nothing was charged.`.replace(/Nothing was charged\.\s*Nothing was charged\./, "Nothing was charged."));
     }
     const invite = created?.invite?.url;
     job.match_id = created?.match_id;
-    if (!job.match_id || typeof invite !== "string") {
-      await settle(false);
-      throw new ToolError("The service created the match but sent no invite link, so the other agent can't join. Nothing was charged.");
-    }
+    if (!job.match_id || typeof invite !== "string") throw new ToolError("The service created the match but sent no invite link, so the other agent can't join. Nothing was charged.");
     // The judges are drawn and shown before anyone pays: check them now.
     const shown = panelOf(created);
-    if (shown.length && !sameSet(shown, args.panel)) {
-      await settle(false);
-      throw new ToolError(`The service's judges for this match (${shown.join(", ")}) aren't the panel you named. Nothing was charged; don't use this match.`, { match_id: job.match_id });
-    }
+    if (shown.length && !sameSet(shown, args.panel)) throw new ToolError(`The service's judges for this match (${shown.join(", ")}) aren't the panel you named. Nothing was charged; don't use this match.`, { match_id: job.match_id });
+    if (created?.title !== undefined && created.title !== title) throw new ToolError("The service changed the match's title, which carries the kind. Nothing was charged; don't use this match.", { match_id: job.match_id });
     job.invite = invite;
     job.stage = "waiting for the other agent to join";
-    const extraOk = await savePending(job, { invite_sent: true });
+    const extraOk = await savePending(job, { invite_sent: true, title });
     if (extraOk) warnings.push(extraOk);
 
     track(job, async () => {
-      let seat;
+      let seat, teamAfter;
       try {
-        seat = await ref.join(job.match_id, args.my_seat, { inviteWaitMs: (args.invite_wait_minutes ?? 30) * 60_000 });
+        ({ seat, team: teamAfter } = await teamHostJoin(ref, job, args));
       } catch (e) {
-        // Only a 4xx from the service (the other agent never joining is a 408) or the payment limit refusing before
-        // signing means the payment never settled. Anything else is ambiguous, including a 5xx or a failed recovery
-        // that the client reports as a service error, and a 429, which can come from the recovery call after a dropped
-        // paid request: keep it counted, so the cap errs on the safe side.
-        const definite = (e instanceof RefereeError && e.status >= 400 && e.status < 500 && e.status !== 429) || /exceeds maximum|max(imum)? ?value|amount exceeds/i.test(String(e?.message ?? e));
-        await settle(!definite);
         if (e instanceof RefereeError && e.status === 408) throw new ToolError(`The other agent didn't join within ${args.invite_wait_minutes ?? 30} minutes. Nothing was charged. Open a new match when you're both ready.`, { match_id: job.match_id });
-        const details = { match_id: job.match_id, wallet: payer.wallet ?? null, ...(warnings.length ? { warnings } : {}) };
-        if (definite) throw new ToolError(explain(e, { paid: true }), details);
-        throw new ToolError(
-          `The paid join didn't get a clear answer (${String(e?.message ?? e).slice(0, 200)}), so the payment for both seats may have gone through. It's counted against today's judge cap to be safe. Check the match at GET /matches/${job.match_id} and the wallet on basescan.org; a paid match that can't be judged goes on the operator's refund list (hello@agentreferee.ai, with the match id).`,
-          details,
-        );
+        throw new ToolError(`The paid join failed: ${explainTeam(e)}`, { match_id: job.match_id, ...(warnings.length ? { warnings } : {}) });
       }
-      // Both seats are filled, so the payment settled.
-      await settle(true);
+      // Both seats are filled, so the allowance was charged.
       job.stage = "waiting for both positions and the verdict";
-      const settlement = payer.lastSettlement?.() ?? null;
-      const paid = { amount: usd(price), for: "both seats", wallet: payer.wallet ?? null, transaction: settlement?.transaction ?? null };
+      const paid = { amount: usd(price), for: "both seats", funding: "team", member: team.member, ...(teamAfter ? { team: teamAfter } : {}) };
       let st;
       try {
         st = await seat.submit(args.position);
       } catch (e) {
         throw new ToolError(`Your seat is paid, but submitting or judging failed: ${explain(e)}. The match id is ${job.match_id}; a paid match that can't be judged goes on the operator's refund list.`, { match_id: job.match_id, paid });
       }
-      const today = await judgeBudget.status().catch(() => null);
-      return finish(job, st, args, { paid, ...(warnings.length ? { warnings } : {}), ...(today ? { judge_spend_today: `${usd(today.spent_micro)} of ${usd(today.limit_micro)} (${jc.timeZone} day)` } : {}) });
+      return finish(job, st, args, { paid, ...(warnings.length ? { warnings } : {}) });
     });
 
     return {
-      summary: `Match opened (${args.tier}, ${usd(price)} for both seats, charged only once the other agent joins). Send the invite link to the other agent: it calls judge_match with action "join", this link, the same tier, panel and rules, and its own position. Then call judge_match with action "result" and job_id "${job.id}".`,
+      summary: `Match opened (${args.tier}, ${KINDS[kind.kind]}; ${usd(price)} for both seats from the team allowance, charged only once the other agent joins). Send the invite link to the other agent: it calls judge_match with action "join", this link, the same kind, tier, panel and rules, and its own position. Then call judge_match with action "result" and job_id "${job.id}".`,
       job_id: job.id,
       status: "running",
       stage: job.stage,
       match_id: job.match_id,
+      kind,
+      title,
       invite,
       price: usd(price),
       ...(warnings.length ? { warnings } : {}),
@@ -314,9 +352,11 @@ export function createJudgeTool({ config, pinned, makeClient, makePayingFetch, j
 
   // ---------- join: take the free seat of an invite match ----------
   async function join(args) {
-    need(args, ["invite", "tier", "panel", "rules", "position"], "join");
-    for (const k of ["seats", "my_seat", "title", "job_id", "invite_wait_minutes"]) if (args[k] !== undefined) throw new ToolError(`join doesn't take ${k}: the match's own settings are used, and checked against what you agreed.`);
+    need(args, ["invite", "tier", "panel", "rules", "position", "kind"], "join");
+    for (const k of ["seats", "my_seat", "title", "job_id", "invite_wait_minutes", "approval"]) if (args[k] !== undefined) throw new ToolError(`join doesn't take ${k}: the match's own settings are used, and checked against what you agreed.`);
     if (!args.position.trim()) throw new ToolError("position is empty.");
+    if (!["dispute", "approved"].includes(args.kind)) throw new ToolError('join needs kind: "dispute" or "approved", the kind you agreed to.');
+    if (args.kind === "approved" && args.dispute_message !== undefined) throw new ToolError('kind "approved" doesn\'t take dispute_message.');
     const pe = judgePanelProblem(args.tier, args.panel, jc.exclude);
     if (pe) throw new ToolError(pe);
     const ref = makeClient({ url: config.url, publicKeys: pinned, pollMs });
@@ -337,10 +377,14 @@ export function createJudgeTool({ config, pinned, makeClient, makePayingFetch, j
     if (barred.length) wrong.push(`the owner's settings exclude ${barred.join(", ")}`);
     const guest = (m.seats ?? []).map((x) => x?.seat ?? x).find((x) => x !== m.host_pays);
     if (!m.host_pays || !guest) wrong.push("it isn't an invite match");
+    const kind = kindOfTitle(m.title);
+    if (!kind) wrong.push("its title carries no kind (neither a rule 9 dispute nor an owner-approved match), so this tool doesn't play it");
+    else if (kind.kind !== args.kind) wrong.push(`it is ${KINDS[kind.kind]}, not ${KINDS[args.kind]}`);
+    else if (kind.kind === "dispute" && args.dispute_message !== undefined && args.dispute_message.trim() !== kind.dispute_message) wrong.push(`its dispute message is "${kind.dispute_message}", not the one you named`);
     if (wrong.length) throw new ToolError(`Not joining: ${wrong.join("; ")}. Nothing was joined.`, { match_id: m.match_id ?? null });
 
-    const job = { id: newJobId(), role: "guest", status: "running", stage: "joining", tier: args.tier, seat: guest, match_id: m.match_id, started_at: new Date().toISOString(), rules_sha256: await sha256Hex(args.rules) };
-    const pend = await savePending(job);
+    const job = { id: newJobId(), role: "guest", status: "running", stage: "joining", tier: args.tier, kind, seat: guest, match_id: m.match_id, started_at: new Date().toISOString(), rules_sha256: await sha256Hex(args.rules) };
+    const pend = await savePending(job, { title: m.title ?? null });
     track(job, async () => {
       let seat;
       try {
@@ -355,10 +399,11 @@ export function createJudgeTool({ config, pinned, makeClient, makePayingFetch, j
       } catch (e) {
         throw new ToolError(`Submitting or judging failed: ${explain(e)}. Your seat was free. The match id is ${job.match_id}.`, { match_id: job.match_id });
       }
-      return finish(job, st, args, { free_seat: "The other agent paid for both seats.", ...(pend ? { pending_record_problem: pend } : {}) });
+      return finish(job, st, args, { free_seat: "The other agent paid for both seats from the team allowance.", ...(pend ? { pending_record_problem: pend } : {}) });
     });
     return awaitJob(job, args.wait_seconds ?? DEFAULT_WAIT_S);
   }
+
 
   async function result(args) {
     need(args, ["job_id"], "result");
@@ -382,7 +427,7 @@ export function createJudgeTool({ config, pinned, makeClient, makePayingFetch, j
     name: "judge_match",
     title: "Settle a dispute with a paid judge match (judge-2 or judge-3)",
     description:
-      `PAID, switched on by the owner. Settles a real disagreement between two agents with independent AI judges from different companies, by rules both agreed to; returns the verdict and a signed receipt. The verdict is advice: the owner decides. One agent opens the match (action "open") and pays for BOTH seats from the owner's wallet (judge-2 ${usd(2 * JUDGE_SEAT_PRICES["judge-2"])}, judge-3 ${usd(2 * JUDGE_SEAT_PRICES["judge-3"])} in all), charged only once the other agent joins, within this server's own daily cap for judge matches (${usd(jc.dailyLimitMicro)} per ${jc.timeZone} day). It gets an invite link to send to the other agent, which joins free (action "join") with the same tier, panel and rules. Both agents agree on the tier, the named panel (exactly 2 or 3 model ids from different companies) and the rules before anyone opens. Positions go to the AI companies running the judges: leave out secrets and personal data. A match can take minutes: use action "result" with the job_id.`,
+      `PAID from the team allowance, switched on by the owner. Settles a real disagreement between two of the owner's own sessions with independent AI judges from different companies, by rules both agreed to; returns the verdict and a signed receipt. The verdict is advice: the owner decides. Only two kinds of match: a rule 9 dispute (kind "dispute": a disagreement that still stood after one written exchange, named by its message), or a match the owner approved one at a time with a yes line typed in this session's own chat (kind "approved"); anything else is refused. One agent opens the match (action "open") and both seats are charged to its member's allowance (judge-2 ${usd(2 * JUDGE_SEAT_PRICES["judge-2"])}, judge-3 ${usd(2 * JUDGE_SEAT_PRICES["judge-3"])} in all), only once the other agent joins; the allowance's own limits apply, and there is no wallet. It gets an invite link to send to the other agent, which joins free (action "join") with the same kind, tier, panel and rules. Both agents agree on the kind, the tier, the named panel (exactly 2 or 3 model ids from different companies) and the rules before anyone opens. Positions go to the AI companies running the judges: leave out secrets and personal data. A match can take minutes: use action "result" with the job_id.`,
     inputSchema: judgeSchema,
     annotations: { title: "Paid judge match", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     handler,
