@@ -263,7 +263,7 @@ export class ReceiptStore {
   /** The full saved record for an id (any kind), or null. */
   async get(id) {
     if (!SAFE_ID.test(String(id))) return null;
-    for (const kind of ["review", "match", "pending"]) {
+    for (const kind of ["review", "match", "pending", "proof"]) {
       try {
         return JSON.parse(await readFile(join(this.dir, `${kind}-${id}.json`), "utf8"));
       } catch {}
