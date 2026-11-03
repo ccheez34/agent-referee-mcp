@@ -1,6 +1,18 @@
 # Changelog
 
-## 0.5.0 (unreleased; release candidate on release-0.5.0-rc)
+## 0.6.0 (unreleased; release candidate on release-0.6.0-rc, from release-0.5.0-rc 5935d81 with judge-match-b3, tiebreak-wording, proof-receipt-tool and gate-b2)
+
+### The gate, as its own server (`agent-referee-gate`, v0.2.1; branch gate-b2, `gate/`)
+- **A second bin, `agent-referee-gate`** (`gate/bin/agent-referee-gate.mjs`): the Agent Referee gate from rules-in-code part B, an MCP server (stdio) that binds one session, the seat, to its owner's rules: `check_action` (owner-only steps allowed only by an approval the owner signed for this seat and this exact action and target, format `agent-referee-owner-approval-v2`, used once, unexpired, unrevoked), `submit_done` (the receipts a kind of work requires, checked offline: pinned key, exact subject, level, freshness, no reuse), `take_lock` and `release_lock`, `budget`, and a `canary` per seat (a decoy secret and a blocked address that must both fail; a failure sticks until the owner clears it). Also a command form, `agent-referee-gate check <action> <target> [target_sha256] [--dry-run]`, for hooks that can't call an MCP tool (exit 0 allowed, 1 not, 2 can't run).
+- **It holds no key that can sign and no token:** approvals come from the owner's record (`GATE_APPROVALS_URL`, https only, or a file), pinned keys from the policy; the policy itself is pinned by sha256 and fails closed (seven baseline owner-only actions, a `members` list, `approval_max_hours` 1 to 168, a canary with an absolute decoy folder and an https address). Settings, policy, the record format and the install order: `gate/README.md`.
+- 81 tests (`npm run test:gate`), each trying to get past one rule; 21 mutants, 20 caught; the checks that shaped it are listed in `gate/README.md` (a fresh read, two review-3x3s, three review-3s, the last on the canary alone).
+
+### Proof receipts (`proof_receipt`, team members, off by default; branch proof-receipt-tool)
+- **`proof_receipt`:** `POST /team/proof` (agent-referee-server d9578f4). L0 `stamp` takes a sha256, or text hashed here and never sent; L1 `observe` takes a repo and a full commit sha. The answer is checked offline (pinned key, `receipt_format`, subject, member, claim), saved as `proof-<id>.json`, and found again by `saved_receipts`. Listed only with `AGENT_REFEREE_TEAM_MEMBER` and `AGENT_REFEREE_PROOF=on` (default off).
+- **`verify_receipt`** reads proof receipts, against the sha256 or commit you hold; claimed and observed are never mixed; the signed limits and "never an approval" are shown. 8 tests; a parity run checked receipts built by the server's own `proofPayload` and `observeGithub` (d9578f4) at L0, L1 commit and L1 checks.
+
+### The tiebreak's description (branch tiebreak-wording, PLAN-v1.4 B5)
+- `tiebreak`'s description: agents with the same owner decide in code by default; the tool is the option when both agree to a fair pick, recorded afterwards.
 
 ### Judge matches between the owner's own sessions (`judge_match`, off by default; branch judge-match-b3, after judge-match-tool)
 - **New tool `judge_match`**, listed only with `AGENT_REFEREE_JUDGE=on`, for RULES rule 9 as PLAN-v1.5's B3 has it: judge matches paid from the **team allowance**, with no wallet and no key on any entry and no separate daily cap (the allowance's own limits apply on the service; his 16:49 Nov 1 removed the $4 limit).

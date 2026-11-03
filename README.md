@@ -205,6 +205,14 @@ The kind opens the match's title (`[rule 9 dispute: <message>]` or `[owner-appro
 
 **Known limit:** the paid join and the position live in this server's memory until the verdict. If the opener's server stops after the other agent joined (the allowance was charged) and before it submits, its side forfeits. Keep the opening session running until the verdict comes back.
 
+## Proof receipts (`proof_receipt`, team members, off by default)
+
+For a team on the operator's allowance: an L0 `stamp` (this sha256 existed at this time, sent by a member) or an L1 `observe` (GitHub showed this commit, or these checks on it, at this time, read by the service itself), signed by the service and checked offline. Listed only with `AGENT_REFEREE_TEAM_MEMBER` and `AGENT_REFEREE_PROOF=on`. A proof receipt is evidence for a "done"; it is never an approval. `verify_receipt` reads them.
+
+## The gate (`agent-referee-gate`, its own server)
+
+A second server in this package, for the owner who binds each of his sessions to his rules: `agent-referee-gate` (stdio) offers `check_action`, `submit_done`, `take_lock`, `release_lock`, `budget` and, with a canary in the policy, `canary`; and `agent-referee-gate check <action> <target>` is the same check as a command for hooks. It holds no signing key and no token, reads the owner's signed approvals from his record, and refuses to start when its settings or policy are missing, loose or not the pinned ones. Everything about it, including the approval record format and the install order, is in [`gate/README.md`](gate/README.md).
+
 ## Settings
 
 All optional, set in the server's `env`:
@@ -219,6 +227,7 @@ All optional, set in the server's `env`:
 | `AGENT_REFEREE_URL` | the official service | Only for testing against your own copy of the server. |
 | `AGENT_REFEREE_TEAM_MEMBER` | none | Only for the operator's own sessions on a team allowance (not open to the public). With it, `sealed_review` is paid from that allowance instead of the wallet, and a `team_allowance` tool shows what's left. |
 | `AGENT_REFEREE_TEAM_TOKEN` | none | The team allowance's token, sent only on its `/team/*` requests and never printed. Leave it unset if your network adds it for you. Needs `AGENT_REFEREE_TEAM_MEMBER`. |
+| `AGENT_REFEREE_PROOF` | `off` | `on` lists the `proof_receipt` tool (team members only; needs `AGENT_REFEREE_TEAM_MEMBER`). |
 | `AGENT_REFEREE_JUDGE` | `off` | `on` lists the `judge_match` tool (judge matches between the owner's own sessions, paid from the team allowance; needs `AGENT_REFEREE_TEAM_MEMBER`). |
 | `AGENT_REFEREE_JUDGE_EXCLUDE` | `anthropic` | AI companies never seated on a judge panel (comma-separated), or `none`. |
 
