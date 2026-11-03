@@ -1,0 +1,462 @@
+// The gate's tools. Who is calling comes from the gate's own settings (GATE_MEMBER, set by the owner per session's
+// entry), never from an argument, so a session can't act as another member.
+import { readFile, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { createHash, randomBytes } from "node:crypto";
+import { ToolError } from "../../src/protocol.mjs";
+import { validate } from "../../src/validate.mjs";
+import { loadApprovalRecords, sortRecords, mismatch } from "./approvals.mjs";
+import { normalizeSubject, receiptId, receiptProblem } from "./receipts.mjs";
+
+const HEX64 = /^[0-9a-f]{64}$/;
+const LOCK = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+const day = (ms) => new Date(ms).toISOString().slice(0, 10);
+const sha256 = (t) => createHash("sha256").update(t, "utf8").digest("hex");
+export const CANARY_RUN_MINUTES = 15;
+
+export function createGateTools({ policy, state, member, approvalsSource, now = () => Date.now(), fetchImpl = fetch, mutexTimeoutMs = 5000 }) {
+  if (!member || !/^[A-Za-z0-9._-]{1,40}$/.test(member)) throw new Error("GATE_MEMBER must name this session's member (letters, digits, . _ -), set by the owner.");
+  if (!policy.members.includes(member)) throw new Error(`GATE_MEMBER "${member}" isn't on the policy's members list, so this gate won't start.`);
+  const skewMs = policy.clock_skew_seconds * 1000;
+  const maxLifeMs = policy.approval_max_hours * 3_600_000;
+  const check = (args, schema) => {
+    const problems = validate(args ?? {}, schema);
+    if (problems.length) throw new ToolError(problems.join(" "));
+  };
+
+  // ---------- check_action ----------
+  const actionSchema = {
+    type: "object",
+    required: ["action", "target"],
+    properties: {
+      action: { type: "string", enum: Object.keys(policy.actions), description: "The kind of step, from the policy's list." },
+      target: { type: "string", minLength: 1, maxLength: 500, description: 'Exactly what it acts on, e.g. "production" or "npm:agent-referee-mcp@0.5.0". Must match the approval byte for byte.' },
+      target_sha256: { type: "string", pattern: "^[0-9a-f]{64}$", description: "The sha256 of the exact thing (a commit's tree, a package tarball, a file), if the approval names one." },
+      dry_run: { type: "boolean", description: "true: only say whether it would be allowed; no use is spent. Default false: an allowed check spends one use of the approval, so call it right before the step." },
+    },
+    additionalProperties: false,
+  };
+
+  async function checkAction(args) {
+    check(args, actionSchema);
+    const req = { action: args.action, target: args.target, target_sha256: args.target_sha256 ?? null, member };
+    const base = { action: req.action, target: req.target, member, policy_version: policy.version };
+    if (policy.actions[req.action] === "open") {
+      await state.log({ tool: "check_action", ...base, allowed: true, why: "open" });
+      return { ...base, allowed: true, owner_only: false, summary: `"${req.action}" isn't owner-only under policy ${policy.version}.` };
+    }
+    const canaryProblem = await canaryStatus();
+    if (canaryProblem) {
+      await state.log({ tool: "check_action", ...base, allowed: false, why: "canary" }).catch(() => {});
+      return { ...base, allowed: false, owner_only: true, summary: `Not allowed: ${canaryProblem}` };
+    }
+    let records;
+    try {
+      records = await loadApprovalRecords({ ...approvalsSource, fetchImpl, readText: (f) => readFile(f, "utf8") });
+    } catch (e) {
+      await state.log({ tool: "check_action", ...base, allowed: false, why: "approvals unreachable" });
+      return { ...base, allowed: false, owner_only: true, summary: `Not allowed: the approvals record can't be read (${String(e?.message ?? e).slice(0, 160)}). Gated steps wait until it can; the owner can still act himself.` };
+    }
+    const { approvals, revoked, rejected } = await sortRecords(records, policy.approval_keys);
+    // A revocation, once seen, is remembered here, so removing it from the record later doesn't reopen the approval.
+    for (const n of revoked) await state.createOnce(`revoked-${n}`, { seen_at: new Date(now()).toISOString() });
+    let remembered;
+    try {
+      remembered = new Set([...revoked, ...(await state.list("revoked-")).map((f) => f.slice("revoked-".length))]);
+    } catch (e) {
+      await state.log({ tool: "check_action", ...base, allowed: false, why: "state unreadable" }).catch(() => {});
+      return { ...base, allowed: false, owner_only: true, summary: `Not allowed: the gate can't read its own records (${String(e?.code ?? e?.message ?? e).slice(0, 60)}), so it can't rule out a revocation. Tell the owner.` };
+    }
+    const reasons = [];
+    let otherSeats = 0;
+    for (const a of approvals) {
+      // Another seat's approval for this action isn't a candidate, and the answer doesn't name it (its nonce or target
+      // would tell this seat what another seat may do); only the count is given, so a mis-issued one still shows.
+      if (a.action === req.action && a.member !== req.member) {
+        otherSeats++;
+        continue;
+      }
+      const m = mismatch(a, req, { policyVersion: policy.version, now: now(), skewMs, revoked: remembered, maxLifeMs });
+      if (m === null) continue;
+      if (m) {
+        reasons.push(m);
+        continue;
+      }
+      // A fitting approval: spend a use (or, for a dry run, only count what's left).
+      const used = (await state.list(`use-${a.nonce}-`)).length;
+      if (used >= a.max_uses) {
+        reasons.push(`approval ${a.nonce.slice(0, 8)} is used up (${a.max_uses} of ${a.max_uses})`);
+        continue;
+      }
+      if (args.dry_run) return { ...base, allowed: true, owner_only: true, dry_run: true, approval_nonce: a.nonce, uses_left: a.max_uses - used, expires_at: a.expires_at, summary: `Would be allowed by the owner's approval ${a.nonce.slice(0, 8)} (${a.max_uses - used} use(s) left). Nothing was spent.` };
+      for (let k = 1; k <= a.max_uses; k++) {
+        if (await state.createOnce(`use-${a.nonce}-${k}`, { member, at: new Date(now()).toISOString(), action: req.action, target: req.target, target_sha256: req.target_sha256 })) {
+          await state.log({ tool: "check_action", ...base, target_sha256: req.target_sha256, allowed: true, approval_nonce: a.nonce, use: k });
+          return { ...base, allowed: true, owner_only: true, approval_nonce: a.nonce, uses_left: a.max_uses - k, expires_at: a.expires_at, summary: `Allowed by the owner's approval ${a.nonce.slice(0, 8)}: use ${k} of ${a.max_uses}. Do the step now.` };
+        }
+      }
+      reasons.push(`approval ${a.nonce.slice(0, 8)} is used up (${a.max_uses} of ${a.max_uses})`);
+    }
+    if (otherSeats) reasons.push(`${otherSeats} approval(s) for "${req.action}" belong to other seats and were ignored`);
+    // A rejected record may be another seat's, so the answer gives its reason without its nonce; the decision log keeps
+    // the first eight characters of the nonce, where only the owner reads them.
+    for (const r of rejected) reasons.push(`a record was ignored: ${r.why}`);
+    await state.log({ tool: "check_action", ...base, target_sha256: req.target_sha256, allowed: false, why: reasons.slice(0, 5), rejected: rejected.slice(0, 5).map((r) => ({ nonce: r.nonce ? String(r.nonce).slice(0, 8) : null, why: r.why })) });
+    return {
+      ...base,
+      allowed: false,
+      owner_only: true,
+      reasons: reasons.slice(0, 20),
+      summary: `Not allowed: "${req.action}" is owner-only and no approval from the owner fits this exact target${reasons.length ? ` (${reasons[0]})` : ""}. Ask the owner; only an approval signed with the owner's key opens it.`,
+    };
+  }
+
+  // ---------- submit_done ----------
+  const doneSchema = {
+    type: "object",
+    required: ["kind", "subject", "receipts"],
+    properties: {
+      kind: { type: "string", enum: Object.keys(policy.done).length ? Object.keys(policy.done) : ["none"], description: "Which kind of done, from the policy's list." },
+      subject: { type: "object", description: "What is done: {repo, sha} for a commit (full 40 hex), and/or {sha256} for the exact file or diff." },
+      receipts: { type: "array", minItems: 1, maxItems: 10, items: { type: "object" }, description: "The signed receipts, one per requirement of this kind." },
+      note: { type: "string", maxLength: 500, description: "Optional: what was done, for the record." },
+    },
+    additionalProperties: false,
+  };
+
+  async function submitDone(args) {
+    check(args, doneSchema);
+    const rule = policy.done[args.kind];
+    if (!rule) throw new ToolError(`The policy has no done kind "${args.kind}".`);
+    const ns = normalizeSubject(args.subject);
+    if (ns.error) throw new ToolError(ns.error);
+    const subject = ns.subject;
+    const t = now();
+    // Which receipts could meet which requirement (each checked once), then a matching that gives every requirement
+    // a different receipt with a different id: a receipt sent twice can't count twice, and the order doesn't matter.
+    const fits = [];
+    const whys = [];
+    for (const req of rule.require) {
+      const ok = [];
+      const why = [];
+      for (let i = 0; i < args.receipts.length; i++) {
+        const problem = await receiptProblem(args.receipts[i], req, subject, { receiptKeys: policy.receipt_keys, now: t, skewMs });
+        if (problem) {
+          why.push(`receipt ${i + 1}: ${problem}`);
+          continue;
+        }
+        const id = receiptId(args.receipts[i]);
+        if (!id) why.push(`receipt ${i + 1}: it has no id`);
+        else if (await state.exists(`accepted-${id}`)) why.push(`receipt ${i + 1}: this gate already accepted it once`);
+        else ok.push({ i, id });
+      }
+      fits.push(ok);
+      whys.push(why);
+    }
+    const owner = new Map(); // receipt id -> requirement index
+    const assign = (r, seen) => {
+      for (const c of fits[r]) {
+        if (seen.has(c.id)) continue;
+        seen.add(c.id);
+        if (!owner.has(c.id) || assign(owner.get(c.id).r, seen)) {
+          owner.set(c.id, { r, c });
+          return true;
+        }
+      }
+      return false;
+    };
+    rule.require.forEach((_, r) => assign(r, new Set()));
+    const byReq = new Map([...owner.values()].map(({ r, c }) => [r, c]));
+    const matched = [];
+    const unmet = [];
+    rule.require.forEach((req, r) => {
+      const label = `${req.level} ${req.check ?? "panel_pass"}`;
+      const c = byReq.get(r);
+      if (c) matched.push({ requirement: label, receipt: c.i + 1, id: c.id });
+      else unmet.push({ requirement: label, why: (whys[r].length ? whys[r] : ["every receipt that fits is needed by another requirement (one receipt meets one requirement)"]).slice(0, 5) });
+    });
+    if (unmet.length) {
+      await state.log({ tool: "submit_done", member, kind: args.kind, subject, accepted: false, unmet: unmet.map((u) => u.requirement) });
+      return { accepted: false, kind: args.kind, subject, member, unmet, summary: `Not accepted: ${unmet.length} of ${rule.require.length} requirement(s) unmet (${unmet.map((u) => u.requirement).join(", ")}). The done stays open.` };
+    }
+    // Every requirement is met: record each receipt as used here. If another submit got one first, undo ours.
+    const recorded = [];
+    for (const m of matched) {
+      if (await state.createOnce(`accepted-${m.id}`, { member, kind: args.kind, subject, at: new Date(t).toISOString() })) recorded.push(m.id);
+      else {
+        for (const id of recorded) await state.remove(`accepted-${id}`);
+        return { accepted: false, kind: args.kind, subject, member, summary: `Not accepted: receipt ${m.receipt} was accepted by another submission a moment ago.` };
+      }
+    }
+    const review = (i) => args.receipts[i]?.payload?.type === "review" ? args.receipts[i].payload.task_sha256 : undefined;
+    const record = {
+      member,
+      kind: args.kind,
+      subject,
+      receipts: matched.map((m) => m.id),
+      ...(matched.some((m) => review(m.receipt - 1)) ? { review_task_sha256: matched.map((m) => review(m.receipt - 1)).filter(Boolean) } : {}),
+      ...(subject.sha256 && subject.repo && rule.allow_unbound_pair ? { pair_bound: false } : {}),
+      note: args.note ?? null,
+      at: new Date(t).toISOString(),
+    };
+    await state.log({ tool: "submit_done", ...record, accepted: true });
+    return { accepted: true, ...record, summary: `Accepted: ${args.kind} for ${subject.repo ? `${subject.repo}@${subject.sha.slice(0, 7)}` : subject.sha256.slice(0, 12)}, with ${matched.length} receipt(s). Each is now used at this gate.` };
+  }
+
+  // ---------- locks ----------
+  const lockSchema = {
+    type: "object",
+    required: ["name"],
+    properties: {
+      name: { type: "string", pattern: LOCK.source, description: 'What is locked, e.g. "deploy-server" or "wallet-main".' },
+      expected_minutes: { type: "integer", minimum: 1, maximum: 720, description: "take_lock: how long it should take (required there)." },
+      note: { type: "string", maxLength: 300 },
+    },
+    additionalProperties: false,
+  };
+
+  async function takeLock(args) {
+    check(args, lockSchema);
+    if (!args.expected_minutes) throw new ToolError("take_lock needs expected_minutes.");
+    const t = now();
+    const rec = { name: args.name, holder: member, taken_at: new Date(t).toISOString(), expected_end: new Date(t + args.expected_minutes * 60_000).toISOString(), note: args.note ?? null };
+    if (await state.createOnce(`lock-${args.name}`, rec)) {
+      await state.log({ tool: "take_lock", ...rec });
+      return { taken: true, ...rec, summary: `Lock ${args.name} is yours until about ${rec.expected_end}. Release it when done.` };
+    }
+    const held = await state.read(`lock-${args.name}`);
+    const staleAt = held ? Date.parse(held.expected_end) + policy.lock_stale_minutes * 60_000 : 0;
+    const stale = held && t > staleAt;
+    return {
+      taken: false,
+      held_by: held?.holder ?? "unknown",
+      expected_end: held?.expected_end ?? null,
+      stale: Boolean(stale),
+      summary: stale
+        ? `Lock ${args.name} is held by ${held.holder} and is stale (${policy.lock_stale_minutes} minutes past its expected end). Message ${held.holder} once, then tell the owner; only the holder or the owner clears it.`
+        : `Lock ${args.name} is held by ${held?.holder ?? "someone"} until about ${held?.expected_end ?? "?"}. Wait, or work on something else.`,
+    };
+  }
+
+  async function releaseLock(args) {
+    check(args, lockSchema);
+    const held = await state.read(`lock-${args.name}`);
+    if (!held) return { released: false, summary: `Lock ${args.name} isn't held.` };
+    if (held.holder !== member) throw new ToolError(`Lock ${args.name} is held by ${held.holder}, not ${member}. Only the holder or the owner can release it.`);
+    await state.remove(`lock-${args.name}`);
+    await state.log({ tool: "release_lock", name: args.name, holder: member });
+    return { released: true, name: args.name, summary: `Lock ${args.name} released.` };
+  }
+
+  // ---------- budget ----------
+  const budgetSchema = {
+    type: "object",
+    properties: {
+      spend_usd: { type: "number", minimum: 0.01, maximum: 1000, description: "Optional: reserve this much before spending it (for example 0.20 for a review-3). Refused if it would pass today's limit." },
+      what: { type: "string", maxLength: 200, description: "What the spend is for (required with spend_usd)." },
+    },
+    additionalProperties: false,
+  };
+
+  async function budget(args) {
+    check(args, budgetSchema);
+    const limit = Object.hasOwn(policy.budgets.daily_usd, member) ? policy.budgets.daily_usd[member] : policy.budgets.default_daily_usd;
+    if (!Number.isFinite(limit) || limit < 0) throw new ToolError("The policy gives this member no valid daily limit.");
+    const today = day(now());
+    const key = `spend-${member}-${today}`;
+    return state.withMutex(key, async () => {
+      const rec = (await state.read(key)) ?? { member, day: today, spent_micro: 0, items: [] };
+      const toMicro = (usd) => Math.round(usd * 1e6);
+      const view = (extra) => ({ member, day: today, limit_usd: limit, spent_usd: rec.spent_micro / 1e6, left_usd: Math.max(0, toMicro(limit) - rec.spent_micro) / 1e6, ...extra });
+      if (args.spend_usd === undefined) return view({ summary: `${member}: $${(rec.spent_micro / 1e6).toFixed(2)} of $${limit.toFixed(2)} reserved today (UTC).` });
+      if (!args.what) throw new ToolError("Say what the spend is for (what).");
+      const want = toMicro(args.spend_usd);
+      if (rec.spent_micro + want > toMicro(limit)) {
+        await state.log({ tool: "budget", member, refused_usd: args.spend_usd, what: args.what });
+        return view({ reserved: false, summary: `Refused: $${args.spend_usd.toFixed(2)} would pass ${member}'s daily limit of $${limit.toFixed(2)} ($${(rec.spent_micro / 1e6).toFixed(2)} already reserved). Spending more needs the owner.` });
+      }
+      rec.spent_micro += want;
+      rec.items.push({ usd: args.spend_usd, what: args.what, at: new Date(now()).toISOString() });
+      await state.writeAtomic(key, rec);
+      await state.log({ tool: "budget", member, reserved_usd: args.spend_usd, what: args.what });
+      return view({ reserved: true, summary: `Reserved $${args.spend_usd.toFixed(2)} for ${args.what}. ${member} has $${((toMicro(limit) - rec.spent_micro) / 1e6).toFixed(2)} left today.` });
+    });
+  }
+
+  // ---------- canary (B2): this seat's sandbox must block a decoy secret and a blocked host ----------
+  /** Why this seat's owner-only steps wait for its canary, or null when the policy sets none or it passed recently. */
+  async function canaryStatus() {
+    if (!policy.canary) return null;
+    let failed, last;
+    try {
+      // Distinct prefixes for the status and the failure, so no member name can make one seat's status another's failure.
+      failed = await state.read(`canary-failed-${member}`);
+      last = await state.read(`canary-status-${member}`);
+    } catch {
+      return "the gate can't read this seat's canary record. Tell the owner.";
+    }
+    if (failed) return `this seat's canary failed at ${failed.at} (${failed.why}). Its sandbox reached something it must not, so owner-only steps wait until the owner fixes the sandbox and clears canary-failed-${member} in the gate's state folder.`;
+    if (!last?.passed) return "this seat has no passing canary yet. Run canary with step \"start\", try both things it names with your own tools, then canary with step \"report\".";
+    const t = Date.parse(last.at);
+    if (!Number.isFinite(t) || t > now() + skewMs) return "this seat's canary record has a bad time. Tell the owner.";
+    if (now() - t > policy.canary.max_age_hours * 3_600_000) return `this seat's canary passed at ${last.at}, more than ${policy.canary.max_age_hours} hours ago. Run it again.`;
+    return null;
+  }
+
+  const canarySchema = {
+    type: "object",
+    required: ["step"],
+    properties: {
+      step: { type: "string", enum: ["start", "report"], description: '"start" writes a fresh decoy and names what to try; "report" records what happened.' },
+      run_id: { type: "string", pattern: "^[0-9a-f]{24}$", description: "For report: the run_id that start returned." },
+      read: { type: "string", enum: ["failed", "succeeded"], description: "For report: did reading the decoy file with your own tools fail or succeed?" },
+      read_text: { type: "string", maxLength: 2000, description: "For report: whatever the read showed, error text included, copied as it was." },
+      fetch: { type: "string", enum: ["failed", "succeeded"], description: "For report: did fetching the blocked address fail or succeed?" },
+      fetch_detail: { type: "string", maxLength: 300, description: "For report: the error or status the fetch gave." },
+    },
+    additionalProperties: false,
+  };
+
+  /** True if any 32-character window of a hex run in the text (case-folded) hashes to the decoy's value: the value may be glued to other hex or upper-cased. */
+  const showsValue = (text, valueSha256) => {
+    for (const m of String(text ?? "").toLowerCase().matchAll(/[0-9a-f]{32,}/g)) for (let i = 0; i + 32 <= m[0].length; i++) if (sha256(m[0].slice(i, i + 32)) === valueSha256) return true;
+    return false;
+  };
+
+  /** A state or mutex error as a reason the session can act on, never the raw message: a corrupt record's text stays out. */
+  const stateProblem = (e) => {
+    if (/is busy/.test(String(e?.message))) return "Another canary call for this seat is in progress. Try again in a moment.";
+    const code = typeof e?.code === "string" && /^[A-Z0-9_]{2,20}$/.test(e.code) ? ` (${e.code})` : "";
+    return `The gate couldn't read or write this seat's canary record${code}. Tell the owner.`;
+  };
+  async function canaryTool(args) {
+    try {
+      return await canaryInner(args);
+    } catch (e) {
+      if (e instanceof ToolError) throw e;
+      throw new ToolError(stateProblem(e));
+    }
+  }
+  async function canaryInner(args) {
+    check(args, canarySchema);
+    if (!policy.canary) throw new ToolError("This gate's policy sets no canary.");
+    const t = now();
+    if (args.step === "start") {
+      // One open run per seat, under the seat's own mutex: two starts at once can't both pass the check below, and a
+      // second start would overwrite the decoy while the first run can still be reported.
+      return state.withMutex(`canary-start-${member}`, async () => {
+        const open = await state.read(`canary-open-${member}`);
+        if (open && !(await state.exists(`canary-report-${open.run_id}`)) && t - Date.parse(open.started_at) <= CANARY_RUN_MINUTES * 60_000)
+          throw new ToolError(`Canary run ${open.run_id} for this seat is still open. Report it, or wait until ${new Date(Date.parse(open.started_at) + CANARY_RUN_MINUTES * 60_000).toISOString()}.`);
+        const runId = randomBytes(12).toString("hex");
+        const value = randomBytes(16).toString("hex");
+        const decoyPath = join(policy.canary.decoy_dir, `decoy-${member}.txt`);
+        try {
+          await writeFile(decoyPath, `AGENT-REFEREE-GATE-DECOY for seat ${member}\nDECOY_SECRET=${value}\nThis is a decoy, not a secret. If a session can read it, its sandbox reaches a folder it must not.\n`);
+        } catch (e) {
+          throw new ToolError(`The gate can't write the decoy (${String(e?.code ?? e?.message ?? e).slice(0, 60)}). The owner creates canary.decoy_dir.`);
+        }
+        // Only the value's hash is kept, so the state folder never holds the decoy itself.
+        await state.createOnce(`canary-run-${runId}`, { member, value_sha256: sha256(value), started_at: new Date(t).toISOString() });
+        await state.writeAtomic(`canary-open-${member}`, { run_id: runId, started_at: new Date(t).toISOString() });
+        await state.log({ tool: "canary", member, step: "start", run_id: runId });
+        return {
+          member,
+          run_id: runId,
+          decoy_path: decoyPath,
+          blocked_url: policy.canary.blocked_url,
+          report_by: new Date(t + CANARY_RUN_MINUTES * 60_000).toISOString(),
+          summary: `With your own tools (not this gate), try to read ${decoyPath} and to fetch ${policy.canary.blocked_url}. Both should fail. Then call canary with step "report", run_id ${runId}, what each attempt did, and the read's output as it was. Report within ${CANARY_RUN_MINUTES} minutes.`,
+        };
+      }, { timeoutMs: mutexTimeoutMs });
+    }
+    if (!args.run_id || !args.read || !args.fetch) throw new ToolError("A report needs run_id, read and fetch.");
+    const run = await state.read(`canary-run-${args.run_id}`);
+    if (!run || run.member !== member) throw new ToolError(`No canary run ${args.run_id} was started for this seat.`);
+    // One report per run, under the run's own mutex: the checks below and the writes happen as one step, so two reports
+    // at once can't both pass the "already reported" check, and a refused report changes nothing.
+    return state.withMutex(`canary-report-${args.run_id}`, async () => {
+      const age = t - Date.parse(run.started_at); // NaN for a corrupt time: refused, like a late report
+      if (!(age >= 0 && age <= CANARY_RUN_MINUTES * 60_000)) throw new ToolError(`Canary run ${args.run_id} is older than ${CANARY_RUN_MINUTES} minutes, or its record is unreadable. Start a new one.`);
+      // Only the seat's open run can be reported: a run whose start crashed before the open record was written, or that
+      // a later start replaced, is refused, so no second reportable run exists for a seat.
+      const open = await state.read(`canary-open-${member}`);
+      if (!open || open.run_id !== args.run_id) throw new ToolError(`Canary run ${args.run_id} isn't this seat's open run: its start didn't finish, or a later start replaced it. Start a new one.`);
+      if (await state.exists(`canary-report-${args.run_id}`)) throw new ToolError(`Canary run ${args.run_id} was already reported.`);
+      // Both free-text fields are scanned, and neither is stored: the state folder keeps the facts, never the text.
+      const valueSeen = showsValue(args.read_text, run.value_sha256) || showsValue(args.fetch_detail, run.value_sha256);
+      const why = [];
+      if (args.read !== "failed") why.push("the decoy file could be read");
+      if (valueSeen) why.push("the report shows the decoy's value");
+      if (args.fetch !== "failed") why.push("the blocked address could be fetched");
+      const record = { member, run_id: args.run_id, at: new Date(t).toISOString(), passed: why.length === 0, read: args.read, fetch: args.fetch, value_seen: valueSeen, why: why.join("; ") || null };
+      // The sticking failure is written first, before the report record and the seat's status: a crash at any later
+      // point leaves the seat blocked, never open, and never with a failure that can't be reported again.
+      if (!record.passed) await state.createOnce(`canary-failed-${member}`, record);
+      if (!(await state.createOnce(`canary-report-${args.run_id}`, record))) throw new ToolError(`Canary run ${args.run_id} was already reported.`);
+      await state.writeAtomic(`canary-status-${member}`, record);
+      await state.log({ tool: "canary", member, step: "report", run_id: args.run_id, passed: record.passed, why: record.why });
+      return {
+        ...record,
+        summary: record.passed
+          ? `Canary passed for ${member}: both attempts failed, as they should. Owner-only steps can be checked for ${policy.canary.max_age_hours} hours. The gate can't see your attempts; it records what you reported.`
+          : `Canary FAILED for ${member}: ${record.why}. Owner-only steps for this seat now wait until the owner fixes its sandbox and clears the record. Tell the owner.`,
+      };
+    }, { timeoutMs: mutexTimeoutMs });
+  }
+  const NOT_APPROVAL = "A receipt can pass a quality step; it never stands in for the owner's yes.";
+  return [
+    {
+      name: "check_action",
+      title: "Is this step allowed?",
+      description: `Call right before any step on the policy's list (deploy, publish, payment, delete, secret, install, rule_change, …). Owner-only steps are allowed only by an approval the owner signed for this seat and this exact action and target, unexpired, unrevoked and unused; an allowed call uses it up${policy.canary ? ", and only while this seat's canary has passed recently" : ""}. ${NOT_APPROVAL} Policy ${policy.version}.`,
+      inputSchema: actionSchema,
+      annotations: { title: "Check an action", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+      handler: checkAction,
+    },
+    {
+      name: "submit_done",
+      title: "Mark work done, with its receipts",
+      description: `Marks a kind of work done only if every receipt the policy requires for that kind checks out offline: the pinned signature, the exact subject, the required level, fresh, and not used at this gate before. L2 needs a review-3 with three "pass" votes from three companies; 2-1 is a list of work to do. ${NOT_APPROVAL}`,
+      inputSchema: doneSchema,
+      annotations: { title: "Submit done", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+      handler: submitDone,
+    },
+    {
+      name: "take_lock",
+      title: "Take a lock (one deploy or paid batch at a time)",
+      description: "Takes a named lock for this member, or says who holds it and whether it's stale. Locks are shared by every session using this gate.",
+      inputSchema: lockSchema,
+      annotations: { title: "Take a lock", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+      handler: takeLock,
+    },
+    {
+      name: "release_lock",
+      title: "Release a lock you hold",
+      description: "Releases a named lock. Only its holder can (the owner clears others by hand).",
+      inputSchema: lockSchema,
+      annotations: { title: "Release a lock", readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      handler: releaseLock,
+    },
+    ...(policy.canary
+      ? [
+          {
+            name: "canary",
+            title: "Prove this seat's sandbox blocks a decoy and a blocked host",
+            description: `Step "start" writes a fresh decoy secret where no session should reach and names an address none should reach; try both with your own tools, then step "report" with what happened. Both must fail, or this seat's owner-only steps wait for the owner. Needed every ${policy.canary.max_age_hours} hours.`,
+            inputSchema: canarySchema,
+            annotations: { title: "Canary", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+            handler: canaryTool,
+          },
+        ]
+      : []),
+    {
+      name: "budget",
+      title: "Today's budget, or reserve a spend",
+      description: "Shows this member's daily limit and what's reserved today (UTC). With spend_usd, reserves that amount first, and refuses if it would pass the owner's limit.",
+      inputSchema: budgetSchema,
+      annotations: { title: "Budget", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+      handler: budget,
+    },
+  ];
+}
