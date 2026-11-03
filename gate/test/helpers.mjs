@@ -148,13 +148,13 @@ export function reviewReceipt({ verdicts = ["pass", "pass", "pass"], models = MO
   return signDoc(payload, key);
 }
 
-export async function gate({ member = "3.0", records = [], policy = pinnedPolicy(), dir, now = () => NOW, approvalsFile } = {}) {
+export async function gate({ member = "3.0", records = [], policy = pinnedPolicy(), dir, now = () => NOW, approvalsFile, mutexTimeoutMs } = {}) {
   dir = dir ?? (await mkdtemp(join(tmpdir(), "gate-")));
   const file = approvalsFile ?? join(dir, "..", `approvals-${hex(4)}.json`);
   if (!approvalsFile) await writeFile(file, JSON.stringify({ approvals: records }));
   const state = new GateState(join(dir, "state"));
   await state.init();
-  const tools = createGateTools({ policy, state, member, approvalsSource: { file }, now });
+  const tools = createGateTools({ policy, state, member, approvalsSource: { file }, now, ...(mutexTimeoutMs ? { mutexTimeoutMs } : {}) });
   const call = (name, args) => tools.find((t) => t.name === name).handler(args, { progress() {} });
   return { call, names: tools.map((t) => t.name), dir, file, state, setRecords: (r) => writeFile(file, JSON.stringify({ approvals: r })) };
 }

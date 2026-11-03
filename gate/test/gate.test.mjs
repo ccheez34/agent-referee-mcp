@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadPolicy, sha256OfText } from "../src/policy.mjs";
 import { loadGateConfig } from "../src/server.mjs";
+import { ToolError } from "../../src/protocol.mjs";
 import {
   gate, approval, revocation, owner, referee, forger, signDoc, NOW, iso, hex, REPO, SHA, DIFF_SHA256,
   policyObject, pinnedPolicy, checksReceipt, stampReceipt, reviewReceipt,
@@ -672,10 +673,10 @@ test("B2 fail closed: a GATE_MEMBER the policy doesn't list doesn't start the ga
   await assert.rejects(buildGateTools(await loadGateConfig(env)), /GATE_MEMBER/);
 });
 
-async function canaryGate({ records = [approval()], member = "3.0", age, nowRef = { t: NOW }, dir } = {}) {
+async function canaryGate({ records = [approval()], member = "3.0", age, nowRef = { t: NOW }, dir, mutexTimeoutMs } = {}) {
   const decoyDir = await mkdtemp(join(tmpdir(), "gate-decoy-"));
   const policy = pinnedPolicy({ canary: { decoy_dir: decoyDir, blocked_url: "https://blocked.invalid/canary", ...(age ? { max_age_hours: age } : {}) } });
-  const g = await gate({ records, member, policy, now: () => nowRef.t, ...(dir ? { dir: dir.dir, approvalsFile: dir.file } : {}) });
+  const g = await gate({ records, member, policy, now: () => nowRef.t, mutexTimeoutMs, ...(dir ? { dir: dir.dir, approvalsFile: dir.file } : {}) });
   return { ...g, decoyDir, nowRef };
 }
 const decoyValue = async (path) => (await (await import("node:fs/promises")).readFile(path, "utf8")).match(/DECOY_SECRET=([0-9a-f]{32})/)[1];
@@ -797,7 +798,7 @@ test("canary: a failing report is recorded as sticking before the report record 
       if (name.startsWith(crashAt) && crashAt.endsWith("-")) throw new Error("disk full");
       return realOnce(name, record);
     };
-    await assert.rejects(g.call("canary", { step: "report", run_id: s.run_id, read: "succeeded", read_text: "the file", fetch: "failed" }), /disk full/);
+    await assert.rejects(g.call("canary", { step: "report", run_id: s.run_id, read: "succeeded", read_text: "the file", fetch: "failed" }), (e) => e instanceof ToolError && /couldn't read or write/.test(e.message) && !/disk full/.test(e.message));
     g.state.writeAtomic = realWrite;
     g.state.createOnce = realOnce;
     assert.match((await g.call("check_action", DEPLOY)).summary, /canary failed/, crashAt);
@@ -862,4 +863,45 @@ test("canary: a policy canary needs an absolute decoy folder and an https addres
   }
   const g = await gate({ policy: pinnedPolicy({ canary: { decoy_dir: join(tmpdir(), `missing-${hex(6)}`), blocked_url: "https://x.invalid" } }) });
   await assert.rejects(g.call("canary", { step: "start" }), /can't write the decoy/);
+});
+
+// ---------------- B2, the canary's second re-check (review-3 of cb27d2e, 3.0-C100) ----------------
+
+test("canary: two reports of one run at once: one is accepted, the other refused, and the refused one leaves no sticking failure", async () => {
+  const g = await canaryGate();
+  const s = await g.call("canary", { step: "start" });
+  const results = await Promise.allSettled([
+    g.call("canary", { step: "report", run_id: s.run_id, read: "failed", fetch: "failed" }),
+    g.call("canary", { step: "report", run_id: s.run_id, read: "succeeded", read_text: "the file", fetch: "failed" }),
+  ]);
+  assert.deepEqual(results.map((r) => r.status), ["fulfilled", "rejected"], JSON.stringify(results.map((r) => r.status === "rejected" ? String(r.reason?.message) : "ok")));
+  assert.match(String(results[1].reason?.message), /already reported/);
+  assert.equal(results[0].value.passed, true);
+  assert.equal(await g.state.exists("canary-failed-3.0"), false, "the refused report wrote nothing");
+  assert.equal((await g.call("check_action", DEPLOY)).allowed, true);
+});
+
+test("canary: a busy mutex, a corrupt record or a failing write is refused as a ToolError the session can act on, never the raw error", async () => {
+  const g = await canaryGate({ mutexTimeoutMs: 100 });
+  // Another gate process holds this seat's start mutex.
+  assert.equal(await g.state.createOnce("mutex-canary-start-3.0", { token: "other", at: Date.now() }), true);
+  await assert.rejects(g.call("canary", { step: "start" }), (e) => e instanceof ToolError && /in progress.*try again/i.test(e.message));
+  await g.state.remove("mutex-canary-start-3.0");
+  const s = await g.call("canary", { step: "start" });
+  // A corrupt run record: its text never reaches the session.
+  const { writeFile: write } = await import("node:fs/promises");
+  await write(join(g.state.dir, `canary-run-${s.run_id}`), "{not json: SECRET-LOOKING-TEXT");
+  await assert.rejects(g.call("canary", { step: "report", run_id: s.run_id, read: "failed", fetch: "failed" }), (e) => e instanceof ToolError && /couldn't read or write/.test(e.message) && /Tell the owner/.test(e.message) && !/SECRET-LOOKING|not json/.test(e.message));
+});
+
+test("canary: only the seat's open run can be reported: a start that crashed before its open record, or a run a later start replaced, is unreportable", async () => {
+  const g = await canaryGate();
+  const s = await g.call("canary", { step: "start" });
+  await g.state.remove("canary-open-3.0"); // as if the start had crashed between the run record and the open record
+  await assert.rejects(g.call("canary", { step: "report", run_id: s.run_id, read: "failed", fetch: "failed" }), /isn't this seat's open run/);
+  const s2 = await g.call("canary", { step: "start" }); // nothing open: a new run may start
+  assert.notEqual(s2.run_id, s.run_id);
+  await assert.rejects(g.call("canary", { step: "report", run_id: s.run_id, read: "failed", fetch: "failed" }), /isn't this seat's open run/);
+  assert.equal((await g.call("canary", { step: "report", run_id: s2.run_id, read: "failed", fetch: "failed" })).passed, true);
+  assert.equal(await g.state.exists(`canary-report-${s.run_id}`), false, "the orphan run was never reported");
 });
