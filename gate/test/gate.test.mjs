@@ -874,11 +874,17 @@ test("canary: two reports of one run at once: one is accepted, the other refused
     g.call("canary", { step: "report", run_id: s.run_id, read: "failed", fetch: "failed" }),
     g.call("canary", { step: "report", run_id: s.run_id, read: "succeeded", read_text: "the file", fetch: "failed" }),
   ]);
-  assert.deepEqual(results.map((r) => r.status), ["fulfilled", "rejected"], JSON.stringify(results.map((r) => r.status === "rejected" ? String(r.reason?.message) : "ok")));
-  assert.match(String(results[1].reason?.message), /already reported/);
-  assert.equal(results[0].value.passed, true);
-  assert.equal(await g.state.exists("canary-failed-3.0"), false, "the refused report wrote nothing");
-  assert.equal((await g.call("check_action", DEPLOY)).allowed, true);
+  // Which report takes the run's mutex first isn't fixed; what must hold: exactly one is accepted, the other is refused
+  // as already reported, and the refused one wrote nothing: the sticking failure exists only if the accepted report failed.
+  const accepted = results.filter((r) => r.status === "fulfilled");
+  const refused = results.filter((r) => r.status === "rejected");
+  assert.equal(accepted.length, 1, JSON.stringify(results.map((r) => (r.status === "rejected" ? String(r.reason?.message) : "ok"))));
+  assert.match(String(refused[0].reason?.message), /already reported/);
+  const acceptedFailed = accepted[0].value.passed === false;
+  assert.equal(await g.state.exists("canary-failed-3.0"), acceptedFailed, "the refused report wrote nothing: a failure exists only if the accepted report failed");
+  assert.equal((await g.call("check_action", DEPLOY)).allowed, !acceptedFailed);
+  const report = await g.state.read(`canary-report-${s.run_id}`);
+  assert.equal(report.passed, !acceptedFailed, "the report record is the accepted one");
 });
 
 test("canary: a busy mutex, a corrupt record or a failing write is refused as a ToolError the session can act on, never the raw error", async () => {
