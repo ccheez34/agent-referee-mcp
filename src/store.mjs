@@ -260,10 +260,21 @@ export class ReceiptStore {
     return items.slice(0, limit);
   }
 
+  /** Whether a record of this kind and id is saved. False when saving is off (callers that need the record fail closed). */
+  async has(kind, id) {
+    if (!this.enabled || !SAFE_ID.test(String(id))) return false;
+    try {
+      await readFile(join(this.dir, `${kind}-${id}.json`));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   /** The full saved record for an id (any kind), or null. */
   async get(id) {
     if (!SAFE_ID.test(String(id))) return null;
-    for (const kind of ["review", "match", "pending"]) {
+    for (const kind of ["review", "match", "pending", "proof", "approval"]) {
       try {
         return JSON.parse(await readFile(join(this.dir, `${kind}-${id}.json`), "utf8"));
       } catch {}
