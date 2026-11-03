@@ -598,6 +598,17 @@ test("B2: an approval for another seat is refused, even by a gate sharing the sa
   assert.equal((await theirs.call("check_action", DEPLOY)).allowed, true);
 });
 
+test("B2: a rejected record's nonce never appears in a refusal (it may be another seat's); the decision log keeps its prefix", async () => {
+  const unsigned = approval({ member: "5.0" }, forger); // another seat's record, badly signed
+  const g = await gate({ records: [unsigned] });
+  const r = await g.call("check_action", DEPLOY);
+  assert.equal(r.allowed, false);
+  assert.match(r.reasons.join(" "), /a record was ignored: not signed by the owner's approval key/);
+  assert.doesNotMatch(JSON.stringify(r), new RegExp(unsigned.payload.nonce.slice(0, 8)));
+  const { readFile } = await import("node:fs/promises");
+  assert.match(await readFile(join(g.dir, "state", "decisions.jsonl"), "utf8"), new RegExp(unsigned.payload.nonce.slice(0, 8)));
+});
+
 test("B2: an approval whose expires_at isn't after issued_at is rejected, even inside the clock skew", async () => {
   const odd = approval({ issued_at: iso(NOW + 100_000), expires_at: iso(NOW + 50_000) });
   const g = await gate({ records: [odd] });
@@ -795,6 +806,15 @@ test("canary: a failing report is recorded as sticking before the report record 
     if (s2) assert.equal((await g.call("canary", { step: "report", run_id: s2.run_id, read: "failed", fetch: "failed" })).passed, true);
     assert.match((await g.call("check_action", DEPLOY)).summary, /canary failed/, crashAt);
   }
+});
+
+test("canary: a second report of a reported run changes nothing, even a failing one", async () => {
+  const g = await canaryGate();
+  const s = await g.call("canary", { step: "start" });
+  assert.equal((await g.call("canary", { step: "report", run_id: s.run_id, read: "failed", fetch: "failed" })).passed, true);
+  await assert.rejects(g.call("canary", { step: "report", run_id: s.run_id, read: "succeeded", read_text: "the file", fetch: "succeeded" }), /already reported/);
+  assert.equal(await g.state.exists("canary-failed-3.0"), false, "no sticking failure from the refused second report");
+  assert.equal((await g.call("check_action", DEPLOY)).allowed, true);
 });
 
 test("canary: two starts at once can't both open a run; a report echoing the value in upper case is seen", async () => {

@@ -98,8 +98,10 @@ export function createGateTools({ policy, state, member, approvalsSource, now = 
       reasons.push(`approval ${a.nonce.slice(0, 8)} is used up (${a.max_uses} of ${a.max_uses})`);
     }
     if (otherSeats) reasons.push(`${otherSeats} approval(s) for "${req.action}" belong to other seats and were ignored`);
-    for (const r of rejected) reasons.push(`a record ${r.nonce ? String(r.nonce).slice(0, 8) + " " : ""}was ignored: ${r.why}`);
-    await state.log({ tool: "check_action", ...base, target_sha256: req.target_sha256, allowed: false, why: reasons.slice(0, 5) });
+    // A rejected record may be another seat's, so the answer gives its reason without its nonce; the decision log keeps
+    // the first eight characters of the nonce, where only the owner reads them.
+    for (const r of rejected) reasons.push(`a record was ignored: ${r.why}`);
+    await state.log({ tool: "check_action", ...base, target_sha256: req.target_sha256, allowed: false, why: reasons.slice(0, 5), rejected: rejected.slice(0, 5).map((r) => ({ nonce: r.nonce ? String(r.nonce).slice(0, 8) : null, why: r.why })) });
     return {
       ...base,
       allowed: false,
@@ -357,6 +359,9 @@ export function createGateTools({ policy, state, member, approvalsSource, now = 
     if (!args.run_id || !args.read || !args.fetch) throw new ToolError("A report needs run_id, read and fetch.");
     const run = await state.read(`canary-run-${args.run_id}`);
     if (!run || run.member !== member) throw new ToolError(`No canary run ${args.run_id} was started for this seat.`);
+    // A second report changes nothing: checked here before any write (two reports at the same instant are still
+    // settled by the report record's atomic creation below, and a failure recorded by the loser only fails closed).
+    if (await state.exists(`canary-report-${args.run_id}`)) throw new ToolError(`Canary run ${args.run_id} was already reported.`);
     const age = t - Date.parse(run.started_at); // NaN for a corrupt time: refused, like a late report
     if (!(age >= 0 && age <= CANARY_RUN_MINUTES * 60_000)) throw new ToolError(`Canary run ${args.run_id} is older than ${CANARY_RUN_MINUTES} minutes, or its record is unreadable. Start a new one.`);
     // Both free-text fields are scanned, and neither is stored: the state folder keeps the facts, never the text.
