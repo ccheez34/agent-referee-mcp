@@ -1,26 +1,29 @@
-# Agent Referee gate (v0.1.0, branch `gate-v0`): rules in code
+# Agent Referee gate (v0.2.0, branch `gate-b2`): rules in code
 
 Part B of the rules-in-code design (`research\specs\rules-in-code-2026-10-31\DESIGN.md`, v0). It's an MCP server that every session goes through for the steps the team's rules govern, whatever AI company runs the session.
 
 **Its test, the owner's:** an agent that ignores, forgets or tries to break its instructions still can't:
-- do anything on the owner-only list
+- do anything on the owner-only list, or do it under another seat's name
 - mark work done without the evidence the policy requires
 - jump a lock or a budget
 
 **What it holds:** no token, and no key that can sign. It can refuse or allow, never approve.
 
-**Status:** built and tested on a branch. It isn't installed anywhere and isn't part of the npm package. Installing it is the owner's yes on the exact files.
+**Status:** built and tested on a branch. It isn't installed anywhere and isn't part of the npm package. Installing it is the owner's yes on the exact files ("Installing it", below).
+
+**v0.2.0 (B2) changes, for whoever signs approvals (part A):** the approval format is now `agent-referee-owner-approval-v2`. An approval names the seat it's for (`member`), is used once (`max_uses` is 1), and may not last longer than the policy's `approval_max_hours`. A v1 approval is rejected with that reason; a v1 revocation still revokes. The policy must list every seat (`members`) and keep the seven baseline actions owner-only, or the gate won't start. A `canary` tool checks each seat's sandbox before its owner-only steps.
 
 ## The tools
 
 | Tool | What it does |
 |---|---|
-| `check_action` | `{action, target, target_sha256?, dry_run?}`. An `"open"` action is allowed. An `"owner_only"` action is allowed only by an owner-signed approval that matches all of these: <br>• this exact action, target and target_sha256 <br>• the policy version <br>• not expired, not dated ahead <br>• not revoked <br>• with a use left <br>An allowed call spends one use, so call it right before the step. `dry_run` spends nothing. If the approvals record can't be read, the answer is no (fail closed). |
+| `check_action` | `{action, target, target_sha256?, dry_run?}`. An `"open"` action is allowed. An `"owner_only"` action is allowed only by an owner-signed approval that matches all of these: <br>• this seat (`member`), from the gate's own settings <br>• this exact action, target and target_sha256 <br>• the policy version <br>• not expired, not dated ahead, and not lasting longer than `approval_max_hours` <br>• not revoked <br>• not used yet <br>An allowed call spends the approval's one use, so call it right before the step. `dry_run` spends nothing. If the policy sets a canary, this seat's canary must have passed within `max_age_hours`, for dry runs too. If the approvals record can't be read, the answer is no (fail closed). |
 | `submit_done` | `{kind, subject, receipts, note?}`. Accepted only if every requirement the policy lists for that kind is met, each by a different receipt (spec v0.4 §5): <br>• the pinned signature (the envelope's own key is never trusted) <br>• the exact normalized subject <br>• the level and check the policy requires <br>• fresh <br>• not accepted here before <br>L2 must be a review-3 with three `pass` votes from three companies, recomputed. A 2-1 is a list of work, not a pass. |
 | `take_lock` / `release_lock` | `{name, expected_minutes?, note?}`. One holder at a time across every session using the same state folder. Others are told who holds it, and whether it's stale (`lock_stale_minutes` past its expected end). Only the holder releases it; the owner clears others by hand. |
+| `canary` | `{step, run_id?, read?, read_text?, fetch?, fetch_detail?}`. Only when the policy sets a canary. `"start"` writes a fresh decoy file where no session should reach and names an https address none should reach; the session tries both with its own tools, then calls `"report"` within 15 minutes with what happened. Both attempts must fail. A pass lets this seat's owner-only steps through for `max_age_hours`; a failure sticks until the owner fixes the sandbox and clears it. |
 | `budget` | `{spend_usd?, what?}`. Shows this member's daily limit (UTC) and what's reserved. With `spend_usd`, it reserves first and refuses past the limit, in parallel too. |
 
-**Who's calling** comes from `GATE_MEMBER` in the gate's own settings, set by the owner for each session's entry. It's never an argument.
+**Who's calling** comes from `GATE_MEMBER` in the gate's own settings, set by the owner for each session's entry. It's never an argument, and it must be on the policy's `members` list, or the gate won't start.
 
 ## Settings (environment)
 
@@ -28,15 +31,15 @@ Part B of the rules-in-code design (`research\specs\rules-in-code-2026-10-31\DES
 |---|---|
 | `GATE_POLICY` | Path of the owner's policy file (JSON, below). |
 | `GATE_POLICY_SHA256` | The policy's sha256, pinned by the owner. On a mismatch the gate won't start, so editing the policy stops the gate instead of loosening it. |
-| `GATE_STATE_DIR` | The gate's state folder: used nonces, accepted receipts, revocations seen, locks, spends, and `decisions.jsonl`. **It must be out of the sessions' reach** (the sandbox, part D), or a session could delete its own used-nonce records. |
-| `GATE_MEMBER` | This session's member name. |
+| `GATE_STATE_DIR` | The gate's state folder: used approvals, accepted receipts, revocations seen, locks, spends, canary records and `decisions.jsonl`. **It must be out of the sessions' reach** (the sandbox, part D), or a session could delete its own used-approval record. |
+| `GATE_MEMBER` | This session's member name (letters, digits, `.`, `_`, `-`; up to 40), listed in the policy's `members`. |
 | `GATE_APPROVALS_URL` or `GATE_APPROVALS_FILE` | The approvals record: part A's `GET /approvals` (https only), or a file. Its integrity comes from the signatures, so whoever can write the record can delete approvals (they stop working) but can't make one. **Use the URL for real use.** With a file, someone who can write it can also delete a revocation before any gate has read it, and that reopens the approval. Once a gate has seen a revocation, it remembers it in the state folder for good. A file is for tests, or for a folder the sessions can't write. |
 
-Start: `node gate/bin/agent-referee-gate.mjs` (stdio).
+Start: `node gate/bin/agent-referee-gate.mjs` (stdio). It refuses to start, with the reason on stderr, when a setting is missing, the policy's sha256 differs from the pinned one, the policy is loose (below), `GATE_MEMBER` isn't listed, or an approval key is also a receipt key.
 
 **As a command, for hooks that can't call an MCP tool:**
 - Syntax: `node gate/bin/agent-referee-gate.mjs check <action> <target> [target_sha256] [--dry-run]`, with the same settings in its environment.
-- It exits 0 only when the action is allowed, and an allowed check spends one use.
+- It exits 0 only when the action is allowed, and an allowed check spends the approval's use.
 - It exits 1 when the action isn't allowed, and 2 when the gate can't run.
 - It writes one JSON line to stdout and the reason to stderr. It needs `agent-referee-client` 0.10 or later, which this repo already depends on.
 
@@ -44,11 +47,14 @@ Start: `node gate/bin/agent-referee-gate.mjs` (stdio).
 ```json
 {
   "format": "agent-referee-gate-policy-v1",
-  "version": "2026-11-01.1",
+  "version": "2026-11-03.1",
+  "members": ["1.0", "2.0", "3.0", "4.0", "5.0"],
   "actions": { "deploy": "owner_only", "publish": "owner_only", "payment": "owner_only", "delete": "owner_only",
                "secret": "owner_only", "install": "owner_only", "rule_change": "owner_only", "merge": "open" },
   "approval_keys": ["<the owner's approval key, base64>"],
   "receipt_keys": ["vM2GY6ZEYc/omRlIFrzu0TaMGtjHXQtchg9d7lPKkTY="],
+  "approval_max_hours": 24,
+  "canary": { "decoy_dir": "/srv/gate-canary", "blocked_url": "https://canary.invalid/", "max_age_hours": 24 },
   "clock_skew_seconds": 120,
   "done": {
     "merge":  { "require": [ { "level": "L1", "check": "github_checks", "required_checks": [{ "name": "test", "app": "github-actions" }], "max_age_minutes": 60 } ] },
@@ -60,7 +66,11 @@ Start: `node gate/bin/agent-referee-gate.mjs` (stdio).
   "lock_stale_minutes": 30
 }
 ```
+- **It fails closed.** The gate doesn't start on a policy that leaves out, or marks `"open"`, any of the seven baseline actions `deploy`, `publish`, `payment`, `delete`, `secret`, `install`, `rule_change`; that lists no `members`; or whose `approval_max_hours` is outside 1 to 168. A policy can add owner-only actions and open ones; it can't loosen the baseline.
+- **`members`** lists each seat's member name once. A gate whose `GATE_MEMBER` isn't listed doesn't start, so a seat the owner hasn't named can't use the gate at all.
 - **Only listed actions exist.** An unknown action is refused, so a hook or agent can't dodge with a new name.
+- **`approval_max_hours`** (default 24) is the longest an approval may last from `issued_at` to `expires_at`. A longer one is refused even if it hasn't expired.
+- **`canary`** (optional): `decoy_dir` is an absolute path to a folder the gate can write and no session should be able to read (outside the sandbox's view); `blocked_url` an https address the sandbox must block; `max_age_hours` (default 24) how long a pass lasts. Leave `canary` out and the tool isn't offered; owner-only steps then rest on the approvals alone.
 - **`required_checks` names each check and the GitHub app that ran it** (`"github-actions"`). A check of the same name from another app doesn't count. An agent that edits the workflow in its own commit so the check always passes is still a risk: protect the workflow files with branch protection, or require an L2 review too.
 - **`on_default_branch: true` on an L1 requirement** asks for a receipt that shows the commit on the repository's default branch. The service records this because a commit shown through a repository's API can live only in a fork. A receipt that says it isn't there, or that GitHub couldn't tell, is refused.
 - **Proof receipts carry their format as `receipt_format`** (`agent-referee-proof-v1`), as signed by agent-referee-server `d9578f4`. A truncated list of commit statuses is refused, like a truncated list of check runs.
@@ -68,30 +78,67 @@ Start: `node gate/bin/agent-referee-gate.mjs` (stdio).
 - **A kind that mixes a commit (L1) and a hash (L0 or L2)** needs `"allow_unbound_pair": true`, set by the owner. No receipt yet proves that the reviewed diff belongs to that commit, so the done record says `pair_bound: false`.
 - **The keys must differ:** the gate won't start if an approval key is also a receipt key, compared as bytes. Each key must be written in its canonical base64 spelling.
 
-## The approval record part A must produce (`agent-referee-owner-approval-v1`)
+## The approval record part A must produce (`agent-referee-owner-approval-v2`)
 
-It uses today's receipt envelope `{payload, signature, algorithm: "Ed25519", public_key}`, signed over `canonicalJson(payload)` (agent-referee-client's) with the owner's approval key.
+It uses today's receipt envelope `{payload, signature, algorithm: "Ed25519", public_key}`, signed over `canonicalJson(payload)` (agent-referee-client's: keys sorted, `undefined` dropped, no whitespace) with the owner's approval key. The gate checks the signature against the policy's `approval_keys` only; the key in the envelope is never trusted.
 
 ```json
-{ "format": "agent-referee-owner-approval-v1", "type": "approval",
-  "action": "deploy", "target": "agent-referee-server:production", "target_sha256": "<64 hex or null>",
-  "policy_version": "2026-11-01.1", "issued_at": "2026-11-01T17:00:00Z", "expires_at": "2026-11-01T19:00:00Z",
+{ "format": "agent-referee-owner-approval-v2", "type": "approval",
+  "member": "3.0",
+  "action": "deploy", "target": "agent-referee-server:production@<40-hex commit>", "target_sha256": null,
+  "policy_version": "2026-11-03.1", "issued_at": "2026-11-03T17:00:00Z", "expires_at": "2026-11-03T19:00:00Z",
   "nonce": "<24-64 lower-case hex>", "max_uses": 1 }
 ```
 
-- **A revocation** is `{format, type: "revocation", nonce, issued_at}` under the same key.
-- **`max_uses`** runs from 1 to 20. A standing approval is several uses with an expiry, for example "deploy staging, at most 3, until 18:00".
-- **`target_sha256: null`** matches only a request without one. When there's a hash, it must match exactly.
-- **`GET /approvals`** may return a list, or `{"approvals": [...]}`.
+- **`member`:** the seat the approval is for, as the gate's `GATE_MEMBER` names it (letters, digits, `.`, `_`, `-`; up to 40). Another seat's gate refuses it, even one sharing the same state folder and record. Part A's form needs a field for the seat.
+- **`action`:** one of the policy's owner-only actions. **`target` and `target_sha256`** (64 lower-case hex, or `null`) are compared byte for byte, so the exact version goes in one of them: a commit in the target, or a bundle's sha256. `target_sha256: null` matches only a request without one. For a payment, the target names the funding and the total (for example `payment:<funding>:<total in USD>`).
+- **`policy_version`:** the gate policy's `version`. An approval made under another version is refused, so re-pinning the policy voids the approvals made before it.
+- **Times:** ISO 8601 in UTC with a trailing `Z`. `issued_at` may not be ahead of the gate's clock by more than `clock_skew_seconds`; `expires_at` must be after now; and `expires_at − issued_at` may not exceed `approval_max_hours`.
+- **`nonce`:** 24 to 64 lower-case hex characters, unique per approval. The gate records each use under the nonce in its state folder.
+- **`max_uses`:** must be 1 (or left out). **An approval is used once.** A standing approval ("deploy staging, at most 3, until 18:00") is three approvals, each with its own nonce and expiry; part A may sign several at once. The owner's standing limits that need no approval record at all (for example dispute matches up to a daily amount) live in a RULES version he confirmed, not in the gate.
+- **A revocation** is `{format, type: "revocation", nonce, issued_at}` under the same key, with the approval's nonce and no `member`. A revocation in the v1 format still counts, since it only takes permission away.
+- **v1 approvals** (`agent-referee-owner-approval-v1`, no seat) are rejected with the reason "names no seat; the owner signs it again as v2". Nothing signed before this version opens anything.
+- **`GET /approvals`** may return a list, or `{"approvals": [...]}`. The gate reads it on every `check_action` (10-second timeout, no redirects, https only).
+
+**What the gate checks, in order, before allowing an owner-only step:** the policy's actions (an unknown or open action never reaches the approvals); this seat's canary, if the policy sets one; the approvals record is readable; each record's shape, then its signature with the pinned keys; the seat; the action, target and target_sha256; the policy version; not dated ahead, not expired, not over the lifetime cap; not revoked, counting revocations seen earlier; and a use left, spent atomically so two gates sharing a state folder can't both spend it. A refusal names the first reason a candidate didn't fit and lists up to 20 reasons in all, rejected records included, so a mistyped target or a stale policy version shows; the decision log keeps the first five.
+
+**Never:** a receipt, a message, a file in a session's reach or a tool's output counts as an approval. Only a record signed with the approvals key does.
+
+## The canary: proving a seat's sandbox blocks what it must
+
+The gate can't see a session's tools, so it asks the session to prove its sandbox from inside and records the answer:
+1. `canary` with step `"start"` writes `decoy-<member>.txt` into `canary.decoy_dir` with a fresh random value, keeps only the value's sha256 in the state folder, and names the decoy's path and `blocked_url`.
+2. The session tries, with its own tools (not the gate), to read the decoy file and to fetch the address. In a working sandbox both fail.
+3. Within 15 minutes it calls step `"report"` with `read` and `fetch` (`"failed"` or `"succeeded"`), the read's output as it was (`read_text`), and the fetch's error (`fetch_detail`).
+4. **A pass** needs both to have failed and the report not to contain the decoy's value. It opens this seat's owner-only steps for `max_age_hours`; then the canary runs again.
+5. **A failure** (a read or fetch that succeeded, or a report that shows the value) is recorded as `canary-failed-<member>` and sticks: this seat's owner-only steps wait until the owner fixes the sandbox and deletes that file in the state folder. The run itself can't be reported twice, used by another seat, or reported after its 15 minutes.
+
+**What it proves:** that an honest session's sandbox blocks the decoy and the host, and that a session that pastes what it read gives itself away. **What it doesn't:** a session that reports "failed" without trying passes. The sandbox check script (part D) is the proof that holds against a lying session; the canary catches a sandbox that quietly lost its settings.
+
+## Installing it, in order (the owner's steps)
+
+Nothing in this folder installs anything. Installing a server, a hook or a policy is on the owner-only list, so each step below is the owner's, on the exact files (their sha256), and nothing is loosened between steps: until the last one, the gate can refuse but its "allowed" means nothing to the rules.
+
+1. **Decide where the gate runs:** inside the sandbox (part D) as a local server, one process per seat, or hosted. Create the state folder (`GATE_STATE_DIR`) where the sessions' user can't read or write; the gate's user can. Create `canary.decoy_dir` the same way.
+2. **Deploy part A** (the approvals service) and read its public key from its own `GET /pubkey`, never from a session or a message. Keep its token on the phone or in the password manager, never on the PC.
+3. **Write the policy file** where sessions can't write it: `members` (every seat's name), `approval_keys` (part A's key), `receipt_keys` (Agent Referee's), the seven baseline actions `owner_only` plus any more, `approval_max_hours`, `canary`, the `done` kinds, `budgets`. Compute its sha256 yourself; that is `GATE_POLICY_SHA256`.
+4. **Start one gate per seat** with `GATE_MEMBER` set to that seat, `GATE_POLICY`, `GATE_POLICY_SHA256`, `GATE_STATE_DIR` and `GATE_APPROVALS_URL`. A gate that won't start says why on stderr; fix the policy or the settings, never the check.
+5. **Run the canary from each seat** (start, try both, report). Every seat must pass before any owner-only step is checked.
+6. **Install the hooks** (part C) so the owner-only commands and the secret paths call `check` first, and the sandbox (part D) so they're unreachable any other way. Run part D's check script; every attempt in it must fail.
+7. **Confirm a RULES version that names this gate's entry and the approvals key** in each session's chat. From then on, an approval the gate accepts counts as the owner's yes for that exact step (RULES rule 1). Before that, the gate is an honest agent's checklist, and his yes is still text in the chat.
+
+**Upgrading from v0.1.0 (`gate-v0`):** the state folder carries over (used nonces, accepted receipts, revocations, locks, spends). Part A must sign v2 records; every v1 approval stops working at once, and the policy needs `members` (and `approval_max_hours` or `canary` if wanted) and a new `version`, which voids the old approvals anyway.
 
 ## Tests
 
-`npm run test:gate` runs 58 tests, each trying to get past one rule:
+`npm run test:gate` runs 68 tests, each trying to get past one rule:
 - **Approvals:** missing, other action or target, other target_sha256, expired, dated ahead, a date that doesn't parse, other policy version, revoked (and still revoked after the revocation is deleted), a revocation ignored when the state can't be listed, used up, two processes racing for one use, signed by a forger, a forger's signature with the owner's key in the envelope, signed with Agent Referee's key, edited after signing, unsigned, and a record that can't be read.
+- **B2:** `max_uses` above 1 rejected and the one use not spent twice; another seat's approval refused, even through a gate sharing the same state and record; an approval with no seat, or in the v1 format, rejected while a v1 revocation still revokes; a lifetime over `approval_max_hours` refused; a policy that leaves a baseline action out or open, or lists no members, doesn't start; a `GATE_MEMBER` the policy doesn't list doesn't start.
+- **Canary:** owner-only steps wait for this seat's canary while open steps don't; both attempts failing passes it, the approval then works, and the pass lapses after `max_age_hours`; a read or fetch that succeeded, or a report showing the decoy's value, fails it and the failure sticks; another seat's run, an old run, a second report or a missing field is refused, and only the value's hash is kept; the policy needs an absolute decoy folder and an https address, and a decoy folder that doesn't exist refuses the canary's `start` step (the owner creates it).
 - **Receipts:** another commit or repo, stale or from the future, a required check still running, failed, missing or run by another app, another run failed, a truncated list, a failed or pending status, the wrong level, a forged signature, edited after signing, an unknown format, reused, two submissions racing, a 2-1, another output, another brief, a tally that doesn't recompute, reviewers not from three named companies (unprefixed ids, an empty or odd prefix, `claudette`, `claude-*` beside `anthropic/`, case variants), receipts in an order a greedy match would get wrong, one receipt sent twice for two requirements, an unbound commit-and-hash pair, a real live 2-1 receipt, and an L1 receipt built by the server's own code (d9578f4); the command form's exit codes.
 - **The rest:** locks, budgets (also across two processes, a crashed holder, and a member named `__proto__`), a changed policy, shared keys in another spelling, and the member's name as an argument.
 
-**Mutants:** 36 checked (each removes one rule). 33 are caught. All three survivors remove a second check that another one already covers:
+**Mutants (v0.1.0, 7f47b61 to 44c6ec5):** 36 checked (each removes one rule). 33 are caught. All three survivors remove a second check that another one already covers:
 - the use-count precheck: the atomic use files still refuse reuse
 - the canonical key spelling: the byte comparison still refuses a shared key
 - the matching's "seen" set by index instead of id: the matching is keyed by receipt id anyway
@@ -104,5 +151,6 @@ It uses today's receipt envelope `{payload, signature, algorithm: "Ed25519", pub
 
 ## What the gate can't do alone
 - **It only binds sessions that must go through it.** The Claude Code hooks (part C) and the sandbox (part D) make the owner-only commands and secret paths unreachable except through `check_action`. Without them, the gate is an honest agent's checklist, not a wall.
+- **The canary records what a session reports.** It catches a sandbox that lost its settings, not a session that lies; part D's check script does that.
 - **"That commit is the one being merged"** is the caller's or CI's to state. The gate checks the receipt against the subject it's given.
 - **One gate's record is per gate** (spec §5): each gate keeps its own accepted-receipt list.
