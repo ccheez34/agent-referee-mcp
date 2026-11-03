@@ -68,7 +68,14 @@ export function createGateTools({ policy, state, member, approvalsSource, now = 
       return { ...base, allowed: false, owner_only: true, summary: `Not allowed: the gate can't read its own records (${String(e?.code ?? e?.message ?? e).slice(0, 60)}), so it can't rule out a revocation. Tell the owner.` };
     }
     const reasons = [];
+    let otherSeats = 0;
     for (const a of approvals) {
+      // Another seat's approval for this action isn't a candidate, and the answer doesn't name it (its nonce or target
+      // would tell this seat what another seat may do); only the count is given, so a mis-issued one still shows.
+      if (a.action === req.action && a.member !== req.member) {
+        otherSeats++;
+        continue;
+      }
       const m = mismatch(a, req, { policyVersion: policy.version, now: now(), skewMs, revoked: remembered, maxLifeMs });
       if (m === null) continue;
       if (m) {
@@ -90,6 +97,7 @@ export function createGateTools({ policy, state, member, approvalsSource, now = 
       }
       reasons.push(`approval ${a.nonce.slice(0, 8)} is used up (${a.max_uses} of ${a.max_uses})`);
     }
+    if (otherSeats) reasons.push(`${otherSeats} approval(s) for "${req.action}" belong to other seats and were ignored`);
     for (const r of rejected) reasons.push(`a record ${r.nonce ? String(r.nonce).slice(0, 8) + " " : ""}was ignored: ${r.why}`);
     await state.log({ tool: "check_action", ...base, target_sha256: req.target_sha256, allowed: false, why: reasons.slice(0, 5) });
     return {
@@ -306,11 +314,21 @@ export function createGateTools({ policy, state, member, approvalsSource, now = 
     additionalProperties: false,
   };
 
+  /** True if any 32-character window of a hex run in the text hashes to the decoy's value (the value may be glued to other hex). */
+  const showsValue = (text, valueSha256) => {
+    for (const m of String(text ?? "").matchAll(/[0-9a-f]{32,}/g)) for (let i = 0; i + 32 <= m[0].length; i++) if (sha256(m[0].slice(i, i + 32)) === valueSha256) return true;
+    return false;
+  };
+
   async function canaryTool(args) {
     check(args, canarySchema);
     if (!policy.canary) throw new ToolError("This gate's policy sets no canary.");
     const t = now();
     if (args.step === "start") {
+      // One open run per seat: a second start would overwrite the decoy while the first run can still be reported.
+      const open = await state.read(`canary-open-${member}`);
+      if (open && !(await state.exists(`canary-report-${open.run_id}`)) && t - Date.parse(open.started_at) <= CANARY_RUN_MINUTES * 60_000)
+        throw new ToolError(`Canary run ${open.run_id} for this seat is still open. Report it, or wait until ${new Date(Date.parse(open.started_at) + CANARY_RUN_MINUTES * 60_000).toISOString()}.`);
       const runId = randomBytes(12).toString("hex");
       const value = randomBytes(16).toString("hex");
       const decoyPath = join(policy.canary.decoy_dir, `decoy-${member}.txt`);
@@ -321,6 +339,7 @@ export function createGateTools({ policy, state, member, approvalsSource, now = 
       }
       // Only the value's hash is kept, so the state folder never holds the decoy itself.
       await state.createOnce(`canary-run-${runId}`, { member, value_sha256: sha256(value), started_at: new Date(t).toISOString() });
+      await state.writeAtomic(`canary-open-${member}`, { run_id: runId, started_at: new Date(t).toISOString() });
       await state.log({ tool: "canary", member, step: "start", run_id: runId });
       return {
         member,
@@ -334,16 +353,19 @@ export function createGateTools({ policy, state, member, approvalsSource, now = 
     if (!args.run_id || !args.read || !args.fetch) throw new ToolError("A report needs run_id, read and fetch.");
     const run = await state.read(`canary-run-${args.run_id}`);
     if (!run || run.member !== member) throw new ToolError(`No canary run ${args.run_id} was started for this seat.`);
-    if (t - Date.parse(run.started_at) > CANARY_RUN_MINUTES * 60_000) throw new ToolError(`Canary run ${args.run_id} is older than ${CANARY_RUN_MINUTES} minutes. Start a new one.`);
-    const valueSeen = [...String(args.read_text ?? "").matchAll(/[0-9a-f]{32}/g)].some((m) => sha256(m[0]) === run.value_sha256);
+    const age = t - Date.parse(run.started_at); // NaN for a corrupt time: refused, like a late report
+    if (!(age >= 0 && age <= CANARY_RUN_MINUTES * 60_000)) throw new ToolError(`Canary run ${args.run_id} is older than ${CANARY_RUN_MINUTES} minutes, or its record is unreadable. Start a new one.`);
+    // Both free-text fields are scanned, and neither is stored: the state folder keeps the facts, never the text.
+    const valueSeen = showsValue(args.read_text, run.value_sha256) || showsValue(args.fetch_detail, run.value_sha256);
     const why = [];
     if (args.read !== "failed") why.push("the decoy file could be read");
     if (valueSeen) why.push("the report shows the decoy's value");
     if (args.fetch !== "failed") why.push("the blocked address could be fetched");
-    const record = { member, run_id: args.run_id, at: new Date(t).toISOString(), passed: why.length === 0, read: args.read, fetch: args.fetch, value_seen: valueSeen, fetch_detail: args.fetch_detail?.slice(0, 300) ?? null, why: why.join("; ") || null };
+    const record = { member, run_id: args.run_id, at: new Date(t).toISOString(), passed: why.length === 0, read: args.read, fetch: args.fetch, value_seen: valueSeen, why: why.join("; ") || null };
     if (!(await state.createOnce(`canary-report-${args.run_id}`, record))) throw new ToolError(`Canary run ${args.run_id} was already reported.`);
-    await state.writeAtomic(`canary-${member}`, record);
+    // The sticking failure is written before the seat's status, so a crash between the two leaves the seat blocked, not open.
     if (!record.passed) await state.createOnce(`canary-failed-${member}`, record);
+    await state.writeAtomic(`canary-${member}`, record);
     await state.log({ tool: "canary", member, step: "report", run_id: args.run_id, passed: record.passed, why: record.why });
     return {
       ...record,

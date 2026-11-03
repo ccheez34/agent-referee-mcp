@@ -29,8 +29,9 @@ function shapeProblem(p) {
   if (p.target_sha256 !== null && !HEX64.test(String(p.target_sha256))) return "target_sha256 must be 64 lower-case hex characters, or null";
   if (typeof p.policy_version !== "string") return "policy_version is missing";
   if (!validTime(p.expires_at)) return "expires_at must be a real ISO time in UTC";
-  const uses = p.max_uses ?? 1;
-  if (uses !== 1) return "max_uses must be 1: an approval is used once";
+  if (Date.parse(p.expires_at) <= Date.parse(p.issued_at)) return "expires_at must be after issued_at";
+  const uses = p.max_uses === undefined ? 1 : p.max_uses; // null isn't "left out"
+  if (uses !== 1) return "max_uses must be 1 (or left out): an approval is used once";
   return null;
 }
 

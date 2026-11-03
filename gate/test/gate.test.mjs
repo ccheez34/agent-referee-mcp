@@ -85,6 +85,9 @@ test("B2: an approval is used once: max_uses above 1 is rejected, and the one us
   const r = await g.call("check_action", DEPLOY);
   assert.equal(r.allowed, false);
   assert.match(r.reasons.join(" "), /max_uses must be 1/);
+  // null isn't "left out": the record says something other than 1.
+  const n = await gate({ records: [approval({ max_uses: null })] });
+  assert.match((await n.call("check_action", DEPLOY)).reasons.join(" "), /max_uses must be 1/);
   const ok = await gate({ records: [approval()] });
   const out = [];
   for (let i = 0; i < 3; i++) out.push((await ok.call("check_action", DEPLOY)).allowed);
@@ -587,19 +590,32 @@ test("B2: an approval for another seat is refused, even by a gate sharing the sa
   const mine = await gate({ records: [a] });
   const r = await mine.call("check_action", DEPLOY);
   assert.equal(r.allowed, false);
-  assert.match(r.reasons.join(" "), /for seat "5\.0", not this one/);
+  // The answer counts another seat's approval but never names it: not its nonce, seat or target.
+  assert.match(r.reasons.join(" "), /1 approval\(s\) for "deploy" belong to other seats/);
+  assert.doesNotMatch(JSON.stringify(r), new RegExp(a.payload.nonce.slice(0, 8)));
+  assert.doesNotMatch(JSON.stringify(r), /5\.0/);
   const theirs = await gate({ records: [a], dir: mine.dir, approvalsFile: mine.file, member: "5.0" });
   assert.equal((await theirs.call("check_action", DEPLOY)).allowed, true);
+});
+
+test("B2: an approval whose expires_at isn't after issued_at is rejected, even inside the clock skew", async () => {
+  const odd = approval({ issued_at: iso(NOW + 100_000), expires_at: iso(NOW + 50_000) });
+  const g = await gate({ records: [odd] });
+  const r = await g.call("check_action", DEPLOY);
+  assert.equal(r.allowed, false);
+  assert.match(r.reasons.join(" "), /expires_at must be after issued_at/);
 });
 
 test("B2: an approval with no seat, or in the old v1 format, is rejected; a v1 revocation still revokes", async () => {
   const { member, ...noSeat } = approval().payload;
   const v1 = approval({ format: "agent-referee-owner-approval-v1" });
-  const g = await gate({ records: [signDoc(noSeat, owner), v1] });
-  const r = await g.call("check_action", DEPLOY);
+  const { target_sha256, ...noHashKey } = approval().payload; // the key must be present: null when there's no hash
+  const g = await gate({ records: [signDoc(noSeat, owner), v1, signDoc(noHashKey, owner)] });
+  const r = await g.call("check_action", { action: DEPLOY.action, target: DEPLOY.target });
   assert.equal(r.allowed, false);
   assert.match(r.reasons.join(" "), /member \(the seat it's for\) is missing/);
   assert.match(r.reasons.join(" "), /names no seat; the owner signs it again/);
+  assert.match(r.reasons.join(" "), /target_sha256 must be 64 lower-case hex characters, or null/);
   const a = approval();
   const oldRevocation = signDoc({ format: "agent-referee-owner-approval-v1", type: "revocation", nonce: a.payload.nonce, issued_at: iso(NOW - 1000) }, owner);
   const g2 = await gate({ records: [a, oldRevocation] });
@@ -715,6 +731,69 @@ test("canary: another seat's run, an old run, a second report or a missing field
   const s2 = await g.call("canary", { step: "start" });
   nowRef.t = NOW + 16 * 60_000;
   await assert.rejects(g.call("canary", { step: "report", run_id: s2.run_id, read: "failed", fetch: "failed" }), /older than 15 minutes/);
+});
+
+test("canary: the decoy's value in fetch_detail, or glued to other hex, fails the report; no state file ever holds the value or the report's text", async () => {
+  const { readdir, readFile } = await import("node:fs/promises");
+  const cases = [
+    (v) => ({ read: "failed", read_text: "denied", fetch: "failed", fetch_detail: `curl: (22) body: DECOY_SECRET=${v}` }),
+    (v) => ({ read: "failed", read_text: `cat: 1${v}`, fetch: "failed", fetch_detail: "ENOTFOUND" }),
+    (v) => ({ read: "failed", read_text: `${v}${v}`, fetch: "failed" }),
+  ];
+  for (const make of cases) {
+    const g = await canaryGate();
+    const s = await g.call("canary", { step: "start" });
+    const value = await decoyValue(s.decoy_path);
+    const args = make(value);
+    const rep = await g.call("canary", { step: "report", run_id: s.run_id, ...args });
+    assert.equal(rep.passed, false, JSON.stringify(args));
+    assert.match(rep.why, /shows the decoy's value/);
+    const stateDir = join(g.dir, "state");
+    for (const f of await readdir(stateDir)) {
+      const text = await readFile(join(stateDir, f), "utf8");
+      assert.equal(text.includes(value), false, `${f} holds the decoy's value`);
+      assert.equal(text.includes("curl: (22)"), false, `${f} holds the report's text`);
+    }
+  }
+});
+
+test("canary: one open run per seat: a second start within 15 minutes is refused until the first is reported", async () => {
+  const nowRef = { t: NOW };
+  const g = await canaryGate({ nowRef });
+  const s = await g.call("canary", { step: "start" });
+  const first = await decoyValue(s.decoy_path);
+  await assert.rejects(g.call("canary", { step: "start" }), /still open/);
+  assert.equal(await decoyValue(s.decoy_path), first, "the decoy wasn't overwritten");
+  assert.equal((await g.call("canary", { step: "report", run_id: s.run_id, read: "failed", fetch: "failed" })).passed, true);
+  const s2 = await g.call("canary", { step: "start" }); // reported: a new run may start
+  nowRef.t = NOW + 16 * 60_000; // an unreported run older than 15 minutes no longer blocks a new one
+  const s3 = await g.call("canary", { step: "start" });
+  assert.notEqual(s3.run_id, s2.run_id);
+  await assert.rejects(g.call("canary", { step: "report", run_id: s2.run_id, read: "failed", fetch: "failed" }), /older than 15 minutes/);
+});
+
+test("canary: a failing report is recorded as sticking before the seat's status, so a crash between the two leaves the seat blocked", async () => {
+  const g = await canaryGate();
+  const s = await g.call("canary", { step: "start" });
+  const real = g.state.writeAtomic.bind(g.state);
+  g.state.writeAtomic = async (name, record) => {
+    if (name === "canary-3.0") throw new Error("disk full");
+    return real(name, record);
+  };
+  await assert.rejects(g.call("canary", { step: "report", run_id: s.run_id, read: "succeeded", read_text: "the file", fetch: "failed" }), /disk full/);
+  g.state.writeAtomic = real;
+  const s2 = await g.call("canary", { step: "start" });
+  assert.equal((await g.call("canary", { step: "report", run_id: s2.run_id, read: "failed", fetch: "failed" })).passed, true);
+  assert.match((await g.call("check_action", DEPLOY)).summary, /canary failed/);
+});
+
+test("canary: a run record whose start time is unreadable is refused, like a late report", async () => {
+  const g = await canaryGate();
+  const s = await g.call("canary", { step: "start" });
+  const run = await g.state.read(`canary-run-${s.run_id}`);
+  await g.state.writeAtomic(`canary-run-${s.run_id}`, { ...run, started_at: "not-a-time" });
+  await assert.rejects(g.call("canary", { step: "report", run_id: s.run_id, read: "failed", fetch: "failed" }), /older than 15 minutes, or its record is unreadable/);
+  assert.match((await g.call("check_action", DEPLOY)).summary, /no passing canary yet/);
 });
 
 test("canary: a policy canary needs an absolute decoy folder and an https address; a missing folder refuses start", async () => {

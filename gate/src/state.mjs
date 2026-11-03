@@ -1,6 +1,6 @@
 // The gate's own state: used approval nonces, accepted receipts, revocations seen, locks, spends and a decision log.
-// Every record that must happen once is a file created with "wx" (fails if it exists), so two gate processes sharing
-// the folder can't both win. The folder must be out of reach of the sessions the gate binds (DESIGN §3B, §3D):
+// Every record that must happen once is a file linked into place from a temporary file (the link fails if the name
+// exists), so two gate processes sharing the folder can't both win. The folder must be out of reach of the sessions the gate binds (DESIGN §3B, §3D):
 // a session that can delete files here can undo its own used-nonce records.
 import { mkdir, readFile, readdir, unlink, writeFile, appendFile, rename, link, stat } from "node:fs/promises";
 import { join } from "node:path";
