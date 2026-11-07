@@ -74,3 +74,8 @@ test("the instructions and the sealed_review and judge_match descriptions end wi
   for (const name of ["demo_match", "tiebreak", "verify_receipt", "review_result", "saved_receipts"])
     assert.ok(!tools.find((t) => t.name === name).description.includes(SERVICE_SENTENCE), name);
 });
+
+test("the hosted server's copy of the sentence is this package's, word for word", () => {
+  const hosted = readFileSync(new URL("../remote/src/tools.mjs", import.meta.url), "utf8");
+  assert.ok(hosted.includes(`export const SCOPE_NOTE =\n  ${JSON.stringify(SCOPE_NOTE)};`), "remote/src/tools.mjs");
+});
