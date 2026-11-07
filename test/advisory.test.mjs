@@ -5,7 +5,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createTools } from "../src/tools.mjs";
-import { INSTRUCTIONS } from "../src/server.mjs";
+import { INSTRUCTIONS, VERSION } from "../src/server.mjs";
 import { SCOPE_NOTE } from "../src/scope.mjs";
 
 const vx = JSON.parse(readFileSync(new URL("./fixtures/multi-judge-vectors.json", import.meta.url), "utf8"));
@@ -75,7 +75,25 @@ test("the instructions and the sealed_review and judge_match descriptions end wi
     assert.ok(!tools.find((t) => t.name === name).description.includes(SERVICE_SENTENCE), name);
 });
 
+const read = (path) => readFileSync(new URL(path, import.meta.url), "utf8");
+
 test("the hosted server's copy of the sentence is this package's, word for word", () => {
-  const hosted = readFileSync(new URL("../remote/src/tools.mjs", import.meta.url), "utf8");
-  assert.ok(hosted.includes(`export const SCOPE_NOTE =\n  ${JSON.stringify(SCOPE_NOTE)};`), "remote/src/tools.mjs");
+  // The hosted server is its own package; its own tests check that its instructions and start_review use this constant.
+  const m = read("../remote/src/tools.mjs").match(/export const SCOPE_NOTE\s*=\s*("(?:[^"\\]|\\.)*")\s*;/);
+  assert.ok(m, "remote/src/tools.mjs defines SCOPE_NOTE as one string");
+  assert.equal(JSON.parse(m[1]), SCOPE_NOTE);
+});
+
+test("the README and the changelog quote the sentence word for word", () => {
+  assert.ok(read("../README.md").includes(SCOPE_NOTE), "README.md");
+  assert.ok(read("../CHANGELOG.md").includes(SCOPE_NOTE), "CHANGELOG.md");
+});
+
+test("the version is the same everywhere it appears", () => {
+  const pkg = JSON.parse(read("../package.json"));
+  const registry = JSON.parse(read("../server.json"));
+  assert.equal(VERSION, pkg.version, "src/server.mjs VERSION");
+  assert.equal(registry.version, pkg.version, "server.json version");
+  assert.deepEqual(registry.packages.map((p) => p.version), [pkg.version], "server.json packages[].version");
+  assert.ok(registry.description.length <= 100, "the registry description is at most 100 characters");
 });
