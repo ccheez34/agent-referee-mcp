@@ -3,17 +3,17 @@
 // (start_review / get_review) and offline receipt checks; paid reviews and tie-breaks stay in the local
 // agent-referee-mcp package, where the owner's wallet lives.
 import { createMcpServer, SUPPORTED_PROTOCOL_VERSIONS } from "../../src/protocol.mjs";
-import { buildTools } from "./tools.mjs";
+import { buildTools, SCOPE_NOTE } from "./tools.mjs";
 
 export { ReviewJob } from "./job.mjs";
 
-export const VERSION = "0.1.1";
+export const VERSION = "0.1.2";
 const MAX_BODY = 65_536; // bytes
 // Browsers may only call from these pages (DNS-rebinding protection). Server-to-server calls send no Origin.
 const DEFAULT_ORIGINS = ["https://chatgpt.com", "https://chat.openai.com"];
 
 export const INSTRUCTIONS =
-  "Agent Referee gives a piece of work an independent, signed check: one AI reviewer, or three from three AI companies, judge it against the task it was for. Call start_review with the exact task and output, then get_review with the job_id until it's done. Report the verdict and the problems found without overstating it: a review is what these models said, not a guarantee. verify_receipt checks a receipt someone hands you. Free: a few reviews per person per day.";
+  "Agent Referee gives a piece of work an independent, signed check: one AI reviewer, or three from three AI companies, judge it against the task it was for. Call start_review with the exact task and output, then get_review with the job_id until it's done. Report the verdict and the problems found without overstating it: a review is what these models said, not a guarantee. verify_receipt checks a receipt someone hands you. Free: a few reviews per person per day. " + SCOPE_NOTE;
 
 const json = (status, body, extra = {}) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...extra } });
 
