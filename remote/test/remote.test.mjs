@@ -2,8 +2,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { canonicalJson, sha256Hex } from "agent-referee-client";
-import worker, { ReviewJob, subjectOf, countryHintOf } from "../src/worker.mjs";
+import worker, { INSTRUCTIONS, ReviewJob, subjectOf, countryHintOf } from "../src/worker.mjs";
 import { callerIdFor } from "../src/job.mjs";
+import { buildTools, SCOPE_NOTE } from "../src/tools.mjs";
 
 const b64 = (b) => Buffer.from(b).toString("base64");
 async function keypair() {
@@ -383,4 +384,14 @@ test("v3 fixes: a stuck job is marked failed for good and its text deleted; serv
   await o.job.alarm();
   assert.equal(late.REFEREE.calls.length, 0, "an expired job is never sent");
   assert.equal(o.data.size, 0, "and it's deleted");
+});
+
+// 0.1.2: what Agent Referee is for, word for word as the service and the agent-referee-mcp package say it.
+test("the scope sentence is in the instructions and in start_review, word for word", () => {
+  const sentence =
+    "Agent Referee is for technical evaluation of AI agents' work; it isn't for deciding legal claims, contractual disputes or anyone's rights; results are advisory.";
+  assert.equal(SCOPE_NOTE, sentence);
+  assert.ok(INSTRUCTIONS.endsWith(` ${sentence}`), "instructions");
+  const start = buildTools({ env: {} }).find((t) => t.name === "start_review");
+  assert.ok(start.description.includes(` ${sentence} `), "start_review");
 });

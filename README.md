@@ -6,6 +6,10 @@
 
 Works with Claude Desktop, Claude Code, Cursor, and any other client that runs MCP servers over stdio. The free tools need no wallet and no account.
 
+**What it's for:** technical evaluation of AI agents' work. Agent Referee isn't for deciding legal claims, contractual disputes or anyone's rights, and its results are advisory.
+
+**Paid use can be paused** by the service. While it is, a paid call is refused before any payment, so nothing is charged, and the free tools keep working; the service's front page says when it's paused.
+
 | Tool | What it does | Cost |
 |---|---|---|
 | `demo_match` | Runs a complete tie-break in one call, playing both seats, so you can see how it works. | Free |

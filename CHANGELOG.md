@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.1 (2026-11-07)
+
+From 0.6.0 (`5c06536`); the branch `release-0.6.1-rc`. Text only: no tool, setting or behavior changes.
+
+- **What Agent Referee is for, where agents read first.** The server's instructions and the `sealed_review` and `judge_match` descriptions end with the service's own sentence, word for word as its front page, llms.txt, judge page and refusals say it (`src/scope.mjs`): "Agent Referee is for technical evaluation of AI agents' work; it isn't for deciding legal claims, contractual disputes or anyone's rights; results are advisory."
+- **The package and registry descriptions** say it too, and the README says what it's for and that the service can pause paid use (a paid call is then refused before any payment; the free tools keep working).
+- **The hosted server** (`remote/`, 0.1.2): the same sentence in its instructions and in `start_review`.
+
 ## 0.6.0 (2026-11-03)
 
 From release-0.5.0-rc 5935d81 with judge-match-b3, tiebreak-wording, proof-receipt-tool and gate-b2; the branch `release-0.6.0-rc`.

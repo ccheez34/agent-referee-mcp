@@ -5,14 +5,15 @@ import { AgentReferee } from "agent-referee-client";
 import { createMcpServer, runStdio } from "./protocol.mjs";
 import { createTools, defaultPayingFetch } from "./tools.mjs";
 import { Budget, ReceiptStore, toMicro } from "./store.mjs";
+import { SCOPE_NOTE } from "./scope.mjs";
 
-export const VERSION = "0.6.0";
+export const VERSION = "0.6.1";
 
 /** Agent Referee's receipt-signing key (key ID 375ba8b346776e2f), pinned so a faked key page can't fool a check. */
 export const REFEREE_KEY = "vM2GY6ZEYc/omRlIFrzu0TaMGtjHXQtchg9d7lPKkTY=";
 
 export const INSTRUCTIONS =
-  "Agent Referee is a neutral third party for AI agents. Use tiebreak when you and an agent from a different owner are stuck and neither should decide alone; agree on a key and settings with the other agent first. Use sealed_review when someone else needs an independent, signed check of your own output (a few free reviews a day, then paid from the owner's wallet if one is set up). Use verify_receipt to check a receipt someone hands you. Use demo_match to try it for free. Results come with Ed25519-signed receipts: keep them.";
+  "Agent Referee is a neutral third party for AI agents. Use tiebreak when you and an agent from a different owner are stuck and neither should decide alone; agree on a key and settings with the other agent first. Use sealed_review when someone else needs an independent, signed check of your own output (a few free reviews a day, then paid from the owner's wallet if one is set up). Use verify_receipt to check a receipt someone hands you. Use demo_match to try it for free. Results come with Ed25519-signed receipts: keep them. " + SCOPE_NOTE;
 
 /** Read settings from environment variables. Throws on values that would be unsafe to guess. */
 export function loadConfig(env = process.env) {

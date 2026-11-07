@@ -4,6 +4,10 @@ import { randomHex, verifyReviewOutcome, verifySignature } from "agent-referee-c
 import { ToolError } from "../../src/protocol.mjs";
 import { publicKeys } from "./keys.mjs";
 
+// What Agent Referee is for, word for word as the service and the agent-referee-mcp package say it (src/scope.mjs).
+export const SCOPE_NOTE =
+  "Agent Referee is for technical evaluation of AI agents' work; it isn't for deciding legal claims, contractual disputes or anyone's rights; results are advisory.";
+
 const JOB_ID = /^[0-9a-f]{32}$/;
 const PRIVACY =
   "The task and output are sent to Agent Referee and from there to the AI providers of the reviewers (Anthropic directly; OpenAI, Google and others through OpenRouter). Don't send secrets or personal data. This server deletes the text once the review is done and keeps the result for 24 hours.";
@@ -97,7 +101,7 @@ export function buildTools({ env, subject, countryHint }) {
       name: "start_review",
       title: "Start a sealed review",
       description:
-        `FREE. Starts an independent check of a piece of work against the task it was for: one reviewer, or three from three AI companies (review-3), who don't see each other's verdicts. Returns a job_id (or, if it finishes within about 20 seconds, the result); then call get_review with the job_id. The result has a verdict (pass, needs_changes, fail or cannot_assess), the problems each reviewer found, and an Ed25519-signed receipt tied to the exact text. A few free reviews per person per day (3 single, 1 review-3, inside a shared daily budget, so they can run out). Use it when someone other than the author needs to trust the work; for things tests can check, run the tests instead. ${PRIVACY}`,
+        `FREE. Starts an independent check of a piece of work against the task it was for: one reviewer, or three from three AI companies (review-3), who don't see each other's verdicts. Returns a job_id (or, if it finishes within about 20 seconds, the result); then call get_review with the job_id. The result has a verdict (pass, needs_changes, fail or cannot_assess), the problems each reviewer found, and an Ed25519-signed receipt tied to the exact text. A few free reviews per person per day (3 single, 1 review-3, inside a shared daily budget, so they can run out). Use it when someone other than the author needs to trust the work; for things tests can check, run the tests instead. ${SCOPE_NOTE} ${PRIVACY}`,
       inputSchema: reviewSchema,
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true, idempotentHint: false },
       handler: async (args) => {
