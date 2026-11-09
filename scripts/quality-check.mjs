@@ -1,7 +1,7 @@
 // After the Oct 27 instruction change (review-v3, judge-v4): do the shorter answers still judge correctly?
 // About $0.55 from the wallet. Run from the agent-referee-mcp folder:
 //
-//   node scripts\quality-check.mjs --wallet-file C:\Users\Admin\Downloads\client-test\test-wallet.txt
+//   node scripts\quality-check.mjs --wallet-file %USERPROFILE%\Downloads\client-test\test-wallet.txt
 //
 // 1. review   of a correct answer        -> must pass                                    ($0.05)
 // 2. review   of a deliberately wrong one -> must not pass, and must name the mistake      ($0.05)

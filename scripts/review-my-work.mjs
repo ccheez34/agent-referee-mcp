@@ -2,7 +2,7 @@
 // The task is the spec the code was written to (not instructions to the reviewers), and three reviewers from three
 // AI companies check the code against it. Runs through this MCP server exactly as an agent would call it.
 //
-//   node scripts\review-my-work.mjs --wallet-file C:\Users\Admin\Downloads\client-test\test-wallet.txt
+//   node scripts\review-my-work.mjs --wallet-file %USERPROFILE%\Downloads\client-test\test-wallet.txt
 //
 // The key is read from the wallet file and handed to the server's environment only; it's never printed.
 import { readFile } from "node:fs/promises";

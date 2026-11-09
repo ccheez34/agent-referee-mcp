@@ -1,7 +1,7 @@
 // Phase 2b: a small, bounded real-money check of the LIVE service after the Phase 1 deploy.
 // Waves of 10 -> 25 -> 50 -> 100 simultaneous sealed reviews ($0.05 each), 2 minutes apart, paid from the test wallet.
 //
-//   node scripts\ramp-test.mjs --wallet-file C:\Users\Admin\Downloads\client-test\test-wallet.txt
+//   node scripts\ramp-test.mjs --wallet-file %USERPROFILE%\Downloads\client-test\test-wallet.txt
 //
 // Hard limits:
 //   - Money: at most 185 reviews x $0.05 = $9.25 can ever be paid. All servers share one daily cap of $9.25, enforced
