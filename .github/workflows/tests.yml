@@ -1,0 +1,44 @@
+# Runs the package's tests, the gate's tests and the hosted server's tests on Linux and Windows with Node 22, at every
+# push and pull request. The package's end-to-end tests use the public server repo's own code as a stand-in service
+# (test/fake-service.mjs), so it is checked out beside this one. Nothing here spends money or needs a secret. Keep the
+# job's name ("test") stable: required checks, once he sets them, name it.
+name: tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: ccheez34/agent-referee-server
+          path: server-src
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install
+        run: npm install --no-audit --no-fund
+      - name: Test the package (the server's code as the stand-in service)
+        env:
+          AGENT_REFEREE_SERVER_DIR: ${{ github.workspace }}/server-src
+        run: npm test
+      - name: Test the gate
+        run: npm run test:gate
+      - name: Install the hosted server
+        working-directory: remote
+        run: npm install --no-audit --no-fund --omit=dev
+      - name: Test the hosted server
+        working-directory: remote
+        run: npm test
