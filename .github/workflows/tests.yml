@@ -2,6 +2,7 @@
 # push and pull request. The package's end-to-end tests use the public server repo's own code as a stand-in service
 # (test/fake-service.mjs), so it is checked out beside this one. Nothing here spends money or needs a secret. Keep the
 # job's name ("test") stable: required checks, once he sets them, name it.
+# With the matrix, GitHub names the checks "test (ubuntu-latest)" and "test (windows-latest)": required checks name those two.
 name: tests
 
 on:
