@@ -7,7 +7,7 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import { tempDir, inProcess } from "./helpers.mjs";
-import { startFakeService, serverAvailable } from "./fake-service.mjs";
+import { startFakeService, serverAvailable, modelSettings } from "./fake-service.mjs";
 import { createServer, loadConfig, buildTools } from "../src/server.mjs";
 import { judgePanelProblem, kindTitle, kindOfTitle, KINDS } from "../src/judge-tool.mjs";
 
@@ -26,7 +26,8 @@ before(async () => {
 after(async () => svc?.close());
 
 const PANEL2 = ["openai/gpt-6-luna", "google/gemini-4-argon"];
-const PANEL3 = ["openai/gpt-6-luna", "google/gemini-4-argon", "mistralai/mistral-large-4-0"];
+// A third company from the server's opt-in list: Mistral may not judge until it passes a judge trial (server, Oct 31).
+const PANEL3 = ["openai/gpt-6-luna", "google/gemini-4-argon", "deepseek/deepseek-v4-pro-0813"];
 const RULES = "Rule 1: the plan that ships the fix today wins. Rule 2: if both do, the smaller change wins.";
 const DISPUTE = "2026-11-03 1226 from-2.0 to-3.0 - reply - the lock stays";
 const YES = "yes to run judge-3 plan-5-vs-5.5 a7a6c1bd336e, $0.70 from the core pool";
@@ -130,6 +131,17 @@ test("a rule 9 dispute, judge-2, end to end: both seats paid from the opener's a
   assert.deepEqual(saved.data.match_kind, { kind: "dispute", dispute_message: DISPUTE });
   const pend = await host.call("saved_receipts", { id: o.data.job_id });
   assert.equal(pend.data.status, "done");
+});
+
+test("a judge the service excludes (JUDGE_EXCLUDE in its wrangler.jsonc) is refused by the service, before anyone pays", { skip }, async () => {
+  const excluded = (modelSettings().JUDGE_EXCLUDE ?? "").split(",").map((m) => m.trim()).filter(Boolean);
+  if (!excluded.length) return; // nothing excluded today: nothing to refuse
+  const host = await agent({ member: "3.0" });
+  for (const model of excluded) {
+    const o = await host.call("judge_match", openArgs({ kind: "approved", dispute_message: undefined, approval: YES, tier: "judge-3", panel: ["openai/gpt-6-luna", "google/gemini-4-argon", model] }));
+    assert.equal(o.isError, true, `${model}: ${o.text}`);
+    assert.match(o.text, /Not in the approved model pool/, o.text);
+  }
 });
 
 test("an owner-approved match, judge-3: the yes line's text and sha256 are recorded, its first 12 hex are in the title and the receipt", { skip }, async () => {

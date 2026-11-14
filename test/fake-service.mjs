@@ -5,7 +5,7 @@
 //
 // It needs the public server repo next to this package (../agent-referee-server) or AGENT_REFEREE_SERVER_DIR.
 import { createServer } from "node:http";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve, join, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -14,6 +14,48 @@ export const SERVER_DIR = resolve(process.env.AGENT_REFEREE_SERVER_DIR || join(h
 export const serverAvailable = () => existsSync(join(SERVER_DIR, "src", "match.ts")) && existsSync(join(SERVER_DIR, "src", "review.ts"));
 
 const load = (f) => import(pathToFileURL(join(SERVER_DIR, "src", f)).href);
+
+// The model settings from the server's own wrangler.jsonc (its top-level "vars", which the live service deploys with),
+// so the stand-in judges and reviews as the live service does: Claude judges off, Mistral excluded from judging until
+// it passes a judge trial (Oct 31), judge-3's default closed with two companies, review-3 with its own list. Set by hand
+// before Nov 13, they had drifted (the Python client's stand-in had the same drift: 5.0's 1155 of Nov 13).
+export const MODEL_KEYS = ["CLAUDE_JUDGES_ENABLED", "JUDGE_MODEL", "JUDGE_MODEL_POOL", "JUDGE_EXCLUDE", "OPT_IN_MODELS", "PANEL_MODELS", "PANEL_2_MODELS", "PANEL_3_MODELS", "REVIEW_3_MODELS"];
+/** JSON as wrangler.jsonc allows it: line and block comments, and trailing commas, outside strings, are dropped. */
+export function parseJsonc(text) {
+  let out = "", i = 0;
+  // Past whitespace and comments from k: the index of the next character that counts.
+  const next = (k) => {
+    for (;;) {
+      while (k < text.length && /\s/.test(text[k])) k++;
+      if (text.startsWith("//", k)) { while (k < text.length && text[k] !== "\n") k++; continue; }
+      if (text.startsWith("/*", k)) { const e = text.indexOf("*/", k + 2); k = e < 0 ? text.length : e + 2; continue; }
+      return k;
+    }
+  };
+  while (i < text.length) {
+    const c = text[i];
+    if (c === '"') { // a string, copied whole, escapes included
+      let j = i + 1;
+      while (j < text.length && text[j] !== '"') j += text[j] === "\\" ? 2 : 1;
+      out += text.slice(i, j + 1);
+      i = j + 1;
+    } else if (text.startsWith("//", i) || text.startsWith("/*", i)) {
+      i = next(i);
+    } else if (c === "," && (text[next(i + 1)] === "}" || text[next(i + 1)] === "]")) {
+      i++; // a trailing comma
+    } else {
+      out += c;
+      i++;
+    }
+  }
+  return JSON.parse(out);
+}
+/** The server's model settings; throws when its wrangler.jsonc is missing or has no judge pool. */
+export function modelSettings(dir = SERVER_DIR) {
+  const vars = parseJsonc(readFileSync(join(dir, "wrangler.jsonc"), "utf8")).vars;
+  if (!vars || typeof vars.JUDGE_MODEL_POOL !== "string") throw new Error(`${join(dir, "wrangler.jsonc")} has no "vars" with JUDGE_MODEL_POOL`);
+  return Object.fromEntries(MODEL_KEYS.filter((k) => typeof vars[k] === "string").map((k) => [k, vars[k]]));
+}
 
 /**
  * Start the fake service on a random localhost port.
@@ -38,8 +80,8 @@ export async function startFakeService({ joinWaitSeconds = 15, reviewAnswer, tea
     JOIN_WAIT_SECONDS: String(joinWaitSeconds),
     ANTHROPIC_API_KEY: "test-anthropic",
     OPENROUTER_API_KEY: "test-openrouter",
-    PANEL_3_MODELS: "claude-opus-5-5,openai/gpt-6-luna,google/gemini-3.7-flash",
     NETWORK: "base",
+    ...modelSettings(),
   };
 
   const mem = () => {
